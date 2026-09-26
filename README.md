@@ -39,6 +39,11 @@ function such as infotainment misbehaves.
 * **Degradation rules**: a best-effort node that fails is stopped and its
   dependents are skipped; a safety-critical node that fails aborts startup
 * **Process supervision**: detects nodes that exit or crash unexpectedly
+* **Resource budgets enforced with cgroup v2**: each node gets its own group
+  with `cpu.max`, `memory.max` and `cpuset.cpus`; the process joins the group
+  before `exec`, so limits apply from its first instruction
+* **Resource monitoring**: per-node CPU usage, memory, peak memory, CPU
+  throttling and OOM kills, read from the cgroup files
 
 ## Requirements
 
@@ -56,21 +61,35 @@ docker build --target base -t vrm-base .
 Build and run the tests inside it:
 
 ```bash
-docker run --rm -v "$PWD":/workspace vrm-base bash -c \
+docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base bash -c \
   "cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure"
 ```
 
-The tests include unit tests (GoogleTest) for the lifecycle state machine and
-the manifest, and end-to-end tests that start real node processes over DDS.
+The tests include unit tests (GoogleTest) for the lifecycle state machine,
+the manifest and the cgroup helpers, end-to-end tests that start real node
+processes over DDS, and tests that check the kernel really enforces the
+budgets (a memory hog is OOM-killed at its limit, a busy loop is throttled to
+its CPU quota, a process is pinned to its CPU).
+
+`--privileged --cgroupns=private` gives the container its own, writable cgroup
+tree. Without it the enforcement tests are skipped and the manager runs
+without enforcing budgets (it logs a warning).
 
 ## Run the Demo System
 
 ```bash
-docker run --rm -it -v "$PWD":/workspace vrm-base build/vrm_manager config/system.yaml
+docker run --rm -it --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/system.yaml
 ```
 
-Press Ctrl-C to shut the system down in order. Add `--exit-after 5` to stop
-automatically after 5 seconds.
+Press Ctrl-C to shut the system down in order.
+
+| Option | Description |
+|---|---|
+| `--exit-after SECONDS` | Stop automatically after this many seconds |
+| `--report-interval SECONDS` | Resource report interval (default 5, 0 = off) |
+| `--no-cgroups` | Do not enforce resource budgets |
+| `--require-cgroups` | Exit with code 3 if budgets cannot be enforced |
 
 ```text
 17:40:36.450 INFO  [manager] spawned brake_control (pid 31, safety_critical)
@@ -88,7 +107,34 @@ infotainment         best_effort          0      55 active
 telemetry_uploader   best_effort          0      63 active
 ```
 
-Try the failure scenarios:
+### Demo: a memory leak does not affect the brake
+
+In [`config/demo_memory_leak.yaml`](config/demo_memory_leak.yaml), infotainment
+leaks 40 MiB/s until it reaches its 128 MiB limit:
+
+```bash
+docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/demo_memory_leak.yaml --exit-after 6 --report-interval 1.5
+```
+
+```text
+RESOURCES                CPU  LIMIT    MEMORY      PEAK     LIMIT THROTTLED  OOM
+brake_control          20.4%    50%     1.6Mi     1.7Mi    64.0Mi         0    0
+infotainment           16.2%   100%    94.7Mi    94.7Mi   128.0Mi         0    0
+
+WARN  [manager] infotainment (best_effort) killed by the OOM killer (memory limit 128.0Mi) unexpectedly
+
+RESOURCES                CPU  LIMIT    MEMORY      PEAK     LIMIT THROTTLED  OOM
+brake_control          20.8%    50%     1.4Mi     1.7Mi    64.0Mi         0    0
+infotainment            0.0%   100%   428.0Ki   128.0Mi   128.0Mi         0    1
+```
+
+The kernel stops infotainment at exactly its limit, and brake_control keeps
+its 10 ms period (605 ticks in 6 seconds) because its memory and CPU are
+accounted separately. In phase 4 the manager will act on the rising memory
+before the OOM killer has to.
+
+### Failure scenarios
 
 ```bash
 # A best-effort node fails to activate; its dependent is skipped, the system keeps running.
@@ -118,8 +164,8 @@ nodes:
 ```
 
 `vrm_demo_node` models a vehicle function: `--period-ms` and `--work-ms` set
-its periodic CPU load, `--memory-mb` the memory it holds, and `--fail-on`
-makes a transition fail for testing.
+its periodic CPU load, `--memory-mb` the memory it holds, `--leak-mb-per-sec`
+makes it leak memory, and `--fail-on` makes a transition fail for testing.
 
 ## Project Structure
 
@@ -128,7 +174,7 @@ vehicle-resource-manager/
 ├── idl/LifecycleMsgs.idl        # DDS types: LifecycleCommand, LifecycleStatus
 ├── include/vrm/                 # Public headers
 ├── src/
-│   ├── core/                    # Lifecycle state machine, manifest, logging (no DDS)
+│   ├── core/                    # Lifecycle state machine, manifest, cgroups, logging (no DDS)
 │   ├── dds/                     # DDS QoS / conversions, ManagedNode base class
 │   ├── manager/                 # vrm_manager: startup, supervision, shutdown
 │   └── nodes/demo_node.cpp      # Configurable demo node
@@ -150,9 +196,9 @@ vehicle-resource-manager/
 
 ### Phase 2 - Resource Budgets
 
-* [ ] Put each node in its own cgroup v2 group
-* [ ] Enforce CPU (`cpu.max`), memory (`memory.max`) and CPU affinity (`cpuset.cpus`)
-* [ ] Measure actual CPU and memory usage per node
+* [x] Put each node in its own cgroup v2 group
+* [x] Enforce CPU (`cpu.max`), memory (`memory.max`) and CPU affinity (`cpuset.cpus`)
+* [x] Measure actual CPU and memory usage per node
 
 ### Phase 3 - Real-time and Supervision
 

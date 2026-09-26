@@ -6,6 +6,8 @@
 // --period-ms  Tick period while Active.
 // --work-ms    CPU time burned per tick (busy loop), to model computation.
 // --memory-mb  Memory allocated and touched in on_configure, freed in on_cleanup.
+// --leak-mb-per-sec  Memory allocated (and never freed) per second while Active,
+//              to model a runaway process.
 // --fail-on    Make a transition fail: configure, activate or error-on-configure.
 #include <chrono>
 #include <cstdlib>
@@ -24,6 +26,7 @@ struct Options {
     int period_ms = 100;
     int work_ms = 0;
     int memory_mb = 0;
+    double leak_mb_per_sec = 0.0;
     std::string fail_on;
 };
 
@@ -42,6 +45,7 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--period-ms") options.period_ms = std::stoi(value());
         else if (arg == "--work-ms") options.work_ms = std::stoi(value());
         else if (arg == "--memory-mb") options.memory_mb = std::stoi(value());
+        else if (arg == "--leak-mb-per-sec") options.leak_mb_per_sec = std::stod(value());
         else if (arg == "--fail-on") options.fail_on = value();
         else {
             std::cerr << "unknown option " << arg << "\n";
@@ -50,7 +54,7 @@ Options parse_options(int argc, char** argv) {
     }
     if (options.name.empty()) {
         std::cerr << "usage: vrm_demo_node --name NAME [--period-ms N] [--work-ms N] "
-                     "[--memory-mb N] [--fail-on configure|activate|error-on-configure]\n";
+                     "[--memory-mb N] [--leak-mb-per-sec N] [--fail-on configure|activate|error-on-configure]\n";
         std::exit(2);
     }
     return options;
@@ -96,10 +100,24 @@ protected:
             // Busy loop to consume CPU like a real computation would.
         }
         ++ticks_;
+        leak();
     }
 
 private:
+    void leak() {
+        if (options_.leak_mb_per_sec <= 0.0) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (last_leak_.time_since_epoch().count() == 0) last_leak_ = now;
+        const double seconds = std::chrono::duration<double>(now - last_leak_).count();
+        const auto bytes = static_cast<std::size_t>(seconds * options_.leak_mb_per_sec * 1024 * 1024);
+        if (bytes < 1024 * 1024) return;
+        last_leak_ = now;
+        leaked_.emplace_back(bytes, 1);  // Filled with 1s, so the pages are resident.
+    }
+
     Options options_;
+    std::vector<std::vector<char>> leaked_;
+    std::chrono::steady_clock::time_point last_leak_{};
     std::vector<char> buffer_;
     long ticks_ = 0;
 };

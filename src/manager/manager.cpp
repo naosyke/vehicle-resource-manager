@@ -27,9 +27,12 @@ std::string_view to_string(NodeOutcome outcome) {
     return "unknown";
 }
 
-Manager::Manager(SystemManifest manifest) : manifest_(std::move(manifest)) {
+Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups)
+    : manifest_(std::move(manifest)), cgroups_(std::move(cgroups)) {
     for (const auto* spec : startup_order(manifest_)) {
-        nodes_.push_back(RunningNode{spec, 0, false, NodeOutcome::NotStarted, ""});
+        RunningNode node{};
+        node.spec = spec;
+        nodes_.push_back(node);
     }
 }
 
@@ -51,7 +54,14 @@ void Manager::reap_children() {
                 continue;
             }
             node.running = false;
-            const auto description = describe_exit(exit->status);
+            auto description = describe_exit(exit->status);
+            if (node.in_cgroup) {
+                sample_resources(node);
+                if (node.usage.oom_kills > 0) {
+                    description = "killed by the OOM killer (memory limit " +
+                                  format_bytes(*node.spec->resources.memory_bytes) + ")";
+                }
+            }
             if (node.outcome == NodeOutcome::Active) {
                 node.outcome = NodeOutcome::Exited;
                 node.detail = description;
@@ -98,7 +108,12 @@ bool Manager::start_node(RunningNode& node) {
     args.insert(args.end(), spec.args.begin(), spec.args.end());
     const auto executable = resolve_executable(spec.executable);
     try {
-        node.pid = spawn_process(executable, args);
+        std::string cgroup_procs;
+        if (cgroups_) {
+            cgroup_procs = cgroups_->create_group(spec.name, spec.resources);
+            node.in_cgroup = true;
+        }
+        node.pid = spawn_process(executable, args, cgroup_procs);
     } catch (const std::exception& error) {
         node.outcome = NodeOutcome::Failed;
         node.detail = error.what();
@@ -145,16 +160,60 @@ bool Manager::start() {
     return true;
 }
 
-void Manager::supervise(std::chrono::milliseconds duration) {
-    const auto end = std::chrono::steady_clock::now() + duration;
+void Manager::supervise(std::chrono::milliseconds duration, std::chrono::milliseconds report_interval) {
+    const auto start = std::chrono::steady_clock::now();
+    auto next_report = start + report_interval;
+    for (auto& node : nodes_) {
+        if (node.in_cgroup) sample_resources(node);  // Baseline for CPU usage.
+    }
+
     while (!g_stop_requested) {
-        if (duration.count() > 0 && std::chrono::steady_clock::now() >= end) {
+        const auto now = std::chrono::steady_clock::now();
+        if (duration.count() > 0 && now - start >= duration) {
             break;
+        }
+        if (cgroups_ && report_interval.count() > 0 && now >= next_report) {
+            print_resources();
+            next_report += report_interval;
         }
         client_.poll();
         reap_children();
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+}
+
+void Manager::sample_resources(RunningNode& node) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto usage = cgroups_->usage(node.spec->name);
+    const auto elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(now - node.sampled_at).count();
+    if (node.sampled_at.time_since_epoch().count() > 0 && elapsed_us > 0) {
+        node.cpu_percent = 100.0 * static_cast<double>(usage.cpu_usage_usec - node.usage.cpu_usage_usec) /
+                           static_cast<double>(elapsed_us);
+    }
+    node.usage = usage;
+    node.sampled_at = now;
+}
+
+void Manager::print_resources() {
+    if (!cgroups_) return;
+    std::printf("\n%-20s %7s %6s %9s %9s %9s %9s %4s\n", "RESOURCES", "CPU", "LIMIT", "MEMORY", "PEAK",
+                "LIMIT", "THROTTLED", "OOM");
+    for (auto& node : nodes_) {
+        if (!node.in_cgroup) continue;
+        if (node.running) sample_resources(node);
+        const auto& budget = node.spec->resources;
+        const std::string cpu_limit =
+            budget.cpu_cores ? std::to_string(static_cast<int>(*budget.cpu_cores * 100 + 0.5)) + "%" : "-";
+        const std::string memory_limit = budget.memory_bytes ? format_bytes(*budget.memory_bytes) : "-";
+        std::printf("%-20s %6.1f%% %6s %9s %9s %9s %9llu %4llu\n", node.spec->name.c_str(),
+                    node.running ? node.cpu_percent : 0.0, cpu_limit.c_str(),
+                    format_bytes(node.usage.memory_current).c_str(), format_bytes(node.usage.memory_peak).c_str(),
+                    memory_limit.c_str(), static_cast<unsigned long long>(node.usage.nr_throttled),
+                    static_cast<unsigned long long>(node.usage.oom_kills));
+    }
+    std::printf("\n");
+    std::fflush(stdout);
 }
 
 void Manager::stop() {

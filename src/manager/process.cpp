@@ -1,5 +1,6 @@
 #include "process.hpp"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -29,7 +30,33 @@ std::string resolve_executable(const std::string& executable) {
     return executable;  // Fall back to PATH lookup in execvp.
 }
 
-pid_t spawn_process(const std::string& executable, const std::vector<std::string>& args) {
+namespace {
+
+// Between fork() and exec() the child of a multi-threaded process may only
+// call async-signal-safe functions (no malloc, no stdio), so these helpers
+// use plain system calls and stack buffers.
+void write_stderr(const char* text) {
+    ssize_t ignored = write(STDERR_FILENO, text, std::strlen(text));
+    (void)ignored;
+}
+
+bool join_cgroup(const char* procs_path) {
+    const int fd = open(procs_path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char digits[16];
+    int length = 0;
+    for (pid_t pid = getpid(); pid > 0; pid /= 10) digits[length++] = static_cast<char>('0' + pid % 10);
+    char text[16];
+    for (int i = 0; i < length; ++i) text[i] = digits[length - 1 - i];
+    const bool ok = write(fd, text, length) == length;
+    close(fd);
+    return ok;
+}
+
+}  // namespace
+
+pid_t spawn_process(const std::string& executable, const std::vector<std::string>& args,
+                    const std::string& cgroup_procs) {
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>(executable.c_str()));
     for (const auto& arg : args) {
@@ -45,8 +72,16 @@ pid_t spawn_process(const std::string& executable, const std::vector<std::string
         // Own process group, so a Ctrl-C in the terminal reaches only the
         // manager, which then shuts the nodes down in order.
         setpgid(0, 0);
+        if (!cgroup_procs.empty() && !join_cgroup(cgroup_procs.c_str())) {
+            write_stderr("cannot join cgroup ");
+            write_stderr(cgroup_procs.c_str());
+            write_stderr("\n");
+            _exit(126);
+        }
         execvp(argv[0], argv.data());
-        std::fprintf(stderr, "cannot execute %s: %s\n", argv[0], std::strerror(errno));
+        write_stderr("cannot execute ");
+        write_stderr(argv[0]);
+        write_stderr("\n");
         _exit(127);
     }
     return pid;

@@ -1,0 +1,26 @@
+# Demo: infotainment leaks memory until it hits its 128Mi limit and the kernel
+# kills it (OOM). brake_control, in its own cgroup, keeps running.
+#
+#   docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+#     build/vrm_manager config/demo_memory_leak.yaml --exit-after 8 --report-interval 2
+system: demo_memory_leak
+transition_timeout_ms: 3000
+
+nodes:
+  - name: brake_control
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "2"]
+    criticality: safety_critical
+    priority: 80
+    resources:
+      cpu: 0.5
+      memory: 64Mi
+      cpus: [0]
+
+  - name: infotainment
+    executable: vrm_demo_node
+    args: ["--period-ms", "33", "--work-ms", "5", "--memory-mb", "32", "--leak-mb-per-sec", "40"]
+    criticality: best_effort
+    resources:
+      cpu: 1.0
+      memory: 128Mi

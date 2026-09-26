@@ -135,9 +135,59 @@ the process to exit (2 s), then `SIGKILL` if needed. Nodes run in their own
 process group, so Ctrl-C reaches only the manager, which then stops the nodes
 in order.
 
-## 5. Planned: Resource Isolation
+## 5. Resource Isolation with cgroup v2
 
-Phase 2 onward adds per-node cgroup v2 groups (`cpu.max`, `memory.max`,
-`cpuset.cpus`), SCHED_FIFO priorities, heartbeat / deadline monitoring and
-pressure-based arbitration, so that lower-criticality nodes cannot interfere
-with safety-critical ones.
+Each node runs in its own cgroup, so the kernel accounts and limits its CPU
+and memory separately from every other node.
+
+```mermaid
+flowchart TB
+    root["/sys/fs/cgroup (container root)<br/>subtree_control: +cpu +memory +cpuset"]
+    init["init/<br/>processes that were in the root"]
+    vrm["vrm/<br/>subtree_control: +cpu +memory +cpuset"]
+    brake["brake_control/<br/>cpu.max 50000 100000<br/>memory.max 64Mi<br/>cpuset.cpus 0"]
+    info["infotainment/<br/>cpu.max 100000 100000<br/>memory.max 128Mi"]
+
+    root --> init
+    root --> vrm
+    vrm --> brake
+    vrm --> info
+```
+
+| Manifest | cgroup file | Effect |
+|---|---|---|
+| `cpu: 0.5` | `cpu.max` = `50000 100000` | At most 50 ms of CPU time per 100 ms period; then the group is throttled |
+| `memory: 64Mi` | `memory.max`, `memory.swap.max = 0` | Allocations beyond the limit trigger reclaim, then the OOM killer inside this group only |
+| `cpus: [0]` | `cpuset.cpus` = `0` | The node's threads may only run on CPU 0 |
+
+**Why `init/`.** cgroup v2 does not allow a group to both contain processes
+and delegate controllers to child groups ("no internal processes" rule). The
+container's processes are therefore moved into `init/` before the controllers
+are enabled. The manager only does this at the root of its own cgroup
+namespace (a container started with `--cgroupns=private`), never in a shared
+cgroup on a host.
+
+**Joining before exec.** The manager creates the node's group first; the
+child process writes its own PID to the group's `cgroup.procs` between
+`fork()` and `exec()`, so the budget applies from the node's first
+instruction. Because the manager is multi-threaded (DDS), that code uses only
+async-signal-safe calls (no allocation, no stdio).
+
+**Monitoring.** The manager reads each group's files:
+
+| File | Used for |
+|---|---|
+| `cpu.stat` `usage_usec` | CPU usage (difference between samples) |
+| `cpu.stat` `nr_throttled` | How often `cpu.max` stopped the node |
+| `memory.current`, `memory.peak` | Current and peak memory |
+| `memory.events` `oom_kill` | Whether an exit was an OOM kill |
+
+When cgroups are not writable (for example an unprivileged container), the
+manager logs a warning and runs without enforcement; `--require-cgroups`
+turns that into an error.
+
+## 6. Planned
+
+Phase 3 adds SCHED_FIFO priorities and heartbeat / deadline monitoring;
+phase 4 adds pressure-based arbitration (PSI), so that lower-criticality nodes
+are throttled or stopped before they can interfere with safety-critical ones.

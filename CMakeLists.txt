@@ -17,6 +17,7 @@ add_library(vrm_core
   src/core/lifecycle.cpp
   src/core/manifest.cpp
   src/core/log.cpp
+  src/core/cgroup.cpp
 )
 target_include_directories(vrm_core PUBLIC include)
 target_link_libraries(vrm_core PUBLIC yaml-cpp)
@@ -53,10 +54,17 @@ find_package(GTest REQUIRED)
 add_executable(vrm_unit_tests
   tests/test_lifecycle.cpp
   tests/test_manifest.cpp
+  tests/test_cgroup_helpers.cpp
 )
 target_link_libraries(vrm_unit_tests PRIVATE vrm_core GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(vrm_unit_tests)
+
+# Needs a writable cgroup v2 filesystem (docker run --privileged --cgroupns=private);
+# the tests skip themselves otherwise.
+add_executable(vrm_cgroup_tests tests/test_cgroup_enforcement.cpp)
+target_link_libraries(vrm_cgroup_tests PRIVATE vrm_core GTest::gtest_main)
+gtest_discover_tests(vrm_cgroup_tests)
 
 # End-to-end: the manager starts real node processes over DDS and stops them.
 add_test(NAME system_startup_and_shutdown

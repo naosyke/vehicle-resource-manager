@@ -13,8 +13,11 @@ namespace vrm {
 // own directory first, so nodes built next to the manager are found.
 std::string resolve_executable(const std::string& executable);
 
-// Starts `executable args...` in its own process group. Throws on failure.
-pid_t spawn_process(const std::string& executable, const std::vector<std::string>& args);
+// Starts `executable args...` in its own process group. When `cgroup_procs`
+// is set, the child moves itself into that cgroup before exec, so the
+// resource limits apply from its first instruction. Throws on failure.
+pid_t spawn_process(const std::string& executable, const std::vector<std::string>& args,
+                    const std::string& cgroup_procs = "");
 
 struct ExitInfo {
     pid_t pid;

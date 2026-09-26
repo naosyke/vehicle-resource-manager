@@ -1,0 +1,18 @@
+# Test: best-effort failures do not stop the system.
+# - media fails to activate; media_sync depends on it and is skipped.
+system: test_system
+transition_timeout_ms: 3000
+nodes:
+  - name: brake_control
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "1"]
+    criticality: safety_critical
+    priority: 80
+  - name: media
+    executable: vrm_demo_node
+    args: ["--fail-on", "activate"]
+    criticality: best_effort
+  - name: media_sync
+    executable: vrm_demo_node
+    criticality: best_effort
+    depends_on: [media]

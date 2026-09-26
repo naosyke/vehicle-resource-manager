@@ -1,0 +1,49 @@
+// Lifecycle messages exchanged between the resource manager and managed nodes.
+module vrm {
+module msg {
+
+enum LifecycleTransition {
+    TRANSITION_CONFIGURE,
+    TRANSITION_CLEANUP,
+    TRANSITION_ACTIVATE,
+    TRANSITION_DEACTIVATE,
+    TRANSITION_SHUTDOWN
+};
+
+enum LifecycleState {
+    STATE_UNCONFIGURED,
+    STATE_INACTIVE,
+    STATE_ACTIVE,
+    STATE_FINALIZED,
+    STATE_CONFIGURING,
+    STATE_CLEANING_UP,
+    STATE_ACTIVATING,
+    STATE_DEACTIVATING,
+    STATE_SHUTTING_DOWN,
+    STATE_ERROR_PROCESSING
+};
+
+// Manager -> node. Topic "vrm_lifecycle_command".
+// QoS: reliable, volatile, keep last 16.
+@topic
+struct LifecycleCommand {
+    @key string node;
+    unsigned long request_id;
+    LifecycleTransition transition;
+};
+
+// Node -> manager, published on every state change. Topic "vrm_lifecycle_status".
+// QoS: reliable, transient local, keep last 1 per node, so a manager that
+// (re)starts late still receives each node's current state.
+@topic
+struct LifecycleStatus {
+    @key string node;
+    LifecycleState state;
+    unsigned long request_id;   // Command that caused this change, 0 if none.
+    boolean success;            // False when the command was rejected or failed.
+    string message;
+    long pid;
+};
+
+};
+};

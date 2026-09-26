@@ -1,0 +1,13 @@
+# Test: a safety-critical node that cannot be configured aborts startup
+# (the manager exits with code 1).
+system: test_safety_failure
+transition_timeout_ms: 3000
+nodes:
+  - name: brake_control
+    executable: vrm_demo_node
+    args: ["--fail-on", "configure"]
+    criticality: safety_critical
+    priority: 80
+  - name: infotainment
+    executable: vrm_demo_node
+    criticality: best_effort

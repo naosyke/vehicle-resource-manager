@@ -1,0 +1,56 @@
+# Demo system: a small set of vehicle functions with different criticality.
+#
+# criticality: safety_critical > mission_critical > best_effort
+# priority:    1-99 = real-time (SCHED_FIFO) priority, 0 = normal scheduling
+# resources:   cpu = cores (cgroup cpu.max), memory = hard limit (memory.max),
+#              cpus = CPU affinity (cpuset.cpus)
+# Resource limits and priorities are enforced from phase 2 / 3 onward.
+system: demo_vehicle
+transition_timeout_ms: 3000
+
+nodes:
+  - name: brake_control
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "2"]
+    criticality: safety_critical
+    priority: 80
+    resources:
+      cpu: 0.5
+      memory: 64Mi
+      cpus: [0]
+
+  - name: perception
+    executable: vrm_demo_node
+    args: ["--period-ms", "50", "--work-ms", "10", "--memory-mb", "32"]
+    criticality: mission_critical
+    priority: 50
+    resources:
+      cpu: 1.0
+      memory: 256Mi
+
+  - name: path_planning
+    executable: vrm_demo_node
+    args: ["--period-ms", "100", "--work-ms", "10"]
+    criticality: mission_critical
+    priority: 40
+    depends_on: [perception]
+    resources:
+      cpu: 0.5
+      memory: 128Mi
+
+  - name: infotainment
+    executable: vrm_demo_node
+    args: ["--period-ms", "33", "--work-ms", "5", "--memory-mb", "64"]
+    criticality: best_effort
+    resources:
+      cpu: 1.0
+      memory: 512Mi
+
+  - name: telemetry_uploader
+    executable: vrm_demo_node
+    args: ["--period-ms", "1000", "--work-ms", "1"]
+    criticality: best_effort
+    depends_on: [path_planning]
+    resources:
+      cpu: 0.2
+      memory: 64Mi

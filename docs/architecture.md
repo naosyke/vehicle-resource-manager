@@ -38,6 +38,7 @@ flowchart LR
 | `LifecycleClient` | `src/manager/lifecycle_client.cpp` | Manager side: sends commands, tracks node status |
 | `Manager` | `src/manager/manager.cpp` | Startup, supervision (heartbeat, deadlines, restarts), degradation rules, shutdown |
 | `DeadlineMonitor` | `src/core/deadline_monitor.cpp` | Latency, response time and deadline misses of periodic work |
+| `Arbiter` | `src/core/arbiter.cpp` | Arbitration policy: which node to throttle, deactivate, stop, restore or demote |
 
 ## 2. Node Lifecycle
 
@@ -227,9 +228,9 @@ the manager warns when it differs from the manifest (e.g. no `CAP_SYS_NICE`).
 **`cpu.max` does not limit `SCHED_FIFO` tasks.** cgroup v2 CPU bandwidth
 control applies to normal tasks only; a runaway real-time task is limited
 only by the kernel's global real-time throttling
-(`sched_rt_runtime_us` = 95 % per second). The manager therefore only
-*monitors* the CPU budget of real-time nodes and warns when it is exceeded.
-Acting on it (e.g. demoting the node) is part of phase 4.
+(`sched_rt_runtime_us` = 95 % per second). The manager monitors the CPU
+budget of real-time nodes, and the arbiter demotes a node that keeps
+exceeding it (section 8).
 
 **Environment limits.** Docker Desktop runs Linux in a virtual machine
 without a `PREEMPT_RT` kernel. `cyclictest` measures kernel wake-up latencies
@@ -286,9 +287,74 @@ after 250 ms, 500 ms, 1 s, 2 s, then 4 s, up to `max_restarts` (default 3).
 When a safety-critical node reaches its limit, the manager reports the system
 as degraded.
 
-## 8. Planned
+## 8. Resource Arbitration
 
-Phase 4 adds pressure-based arbitration (PSI) and acting on budget overruns
-(including demoting real-time nodes that exceed their CPU budget), so that
-lower-criticality nodes are throttled or stopped before they can interfere
-with safety-critical ones.
+Scheduling priority prevents interference for real-time nodes. Arbitration
+handles the rest: nodes that are not real-time but still important, memory,
+and real-time nodes that misbehave. The policy (`Arbiter`,
+[`src/core/arbiter.cpp`](../src/core/arbiter.cpp)) is pure logic: every 0.5 s
+the manager passes it the measurements of all nodes and carries out the
+actions it returns.
+
+### Degradation ladder
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    Normal --> Throttled: interference
+    Throttled --> Deactivated: deadline misses persist
+    Deactivated --> Stopped: deadline misses persist
+    Throttled --> Normal: calm for recovery_s
+    Deactivated --> Throttled: calm for recovery_s
+```
+
+| Level | Action | Effect |
+|---|---|---|
+| Throttled | `cpu.max` = `throttle_cpu` (10 %) | The node keeps working, slower |
+| Deactivated | lifecycle `deactivate` | Periodic work stops; the process stays alive and can resume instantly |
+| Stopped | lifecycle `shutdown` | The node is gone until the next start |
+
+### Triggers
+
+| Signal | Source | Allows |
+|---|---|---|
+| A protected node waits for CPU more than `cpu_pressure_threshold` (25 %) | PSI `cpu.pressure` of its cgroup, difference of `total` between samples | Throttling only - part of the wait is caused by more critical nodes, which is legitimate |
+| A protected node misses deadlines in `miss_rounds` (2) consecutive rounds | Heartbeats | The whole ladder - this is actual harm; a single spike (e.g. a VM stall) is ignored |
+
+Protected nodes are safety- and mission-critical ones. A victim must be
+strictly less critical than the suffering node and able to run on the same
+CPU (overlapping `cpuset`, or unpinned). Among candidates: least critical
+first, then the least degraded (throttle everyone before deactivating
+anyone), then the lowest priority, then the biggest CPU user. One step is
+taken per `escalation_interval_s`, so the effect of each step can be seen
+before the next.
+
+### Recovery and hysteresis
+
+After `recovery_s` without interference, the most critical degraded node is
+restored one step (a deactivated node before a throttled one). If the
+interference returns right after a restore, the calm period doubles (up to
+8x), so the system does not flap between two states. Stopped nodes stay
+stopped.
+
+### Memory and real-time overruns
+
+| Situation | Action |
+|---|---|
+| `memory.current` ≥ 90 % of `memory.max` (not safety-critical) | Graceful `deactivate` + `shutdown`, before the OOM killer kills the node |
+| `SCHED_FIFO` node above its CPU budget for `rt_overrun_s` | Every thread is switched to `SCHED_OTHER`, so its `cpu.max` applies |
+
+Safety-critical nodes are never degraded or stopped by the arbiter.
+
+### Limits
+
+Arbitration reacts within seconds, so a few misses happen before it acts;
+it complements real-time priority rather than replacing it. In the Docker
+Desktop VM, a stall that spans two rounds can look like persistent misses and
+trigger a step that was not needed; `miss_rounds` trades reaction time
+against such false positives.
+
+## 9. Planned
+
+Resource and lifecycle telemetry over DDS, so other tools (and other ECUs)
+can subscribe to the manager's view of the system.

@@ -1,0 +1,11 @@
+# Test: a SCHED_FIFO node that keeps exceeding its CPU budget is demoted to
+# normal scheduling, where its cgroup cpu.max (30%) applies again.
+system: test_rt_runaway
+transition_timeout_ms: 3000
+nodes:
+  - name: planner
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "8", "--no-deadline"]
+    criticality: mission_critical
+    priority: 60
+    resources: {cpu: 0.3, memory: 64Mi, cpus: [1]}

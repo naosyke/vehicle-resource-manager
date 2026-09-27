@@ -52,8 +52,13 @@ function such as infotainment misbehaves.
 * **Alive supervision and restarts**: a node whose heartbeat stops is treated
   as hung and killed; crashed or hung nodes are restarted with backoff
   according to their restart policy
+* **Resource arbitration**: when a protected node waits for CPU (PSI) or keeps
+  missing deadlines, less critical nodes on the same CPUs are throttled,
+  deactivated and finally stopped - only as far as needed - and restored when
+  things calm down. Nodes near their memory limit are stopped gracefully
+  before the OOM killer strikes; runaway `SCHED_FIFO` nodes are demoted
 * **Live dashboard**: CPU core map, usage against budget, response time
-  against deadline, and events in the browser
+  against deadline, arbitration state and events in the browser
 
 ## Requirements
 
@@ -101,6 +106,7 @@ Press Ctrl-C to shut the system down in order.
 | `--no-cgroups` | Do not enforce resource budgets |
 | `--require-cgroups` | Exit with code 3 if budgets cannot be enforced |
 | `--no-rt` | Run every node with normal scheduling (for comparisons) |
+| `--no-arbitration` | Never throttle, deactivate or stop nodes to protect others |
 | `--status-file PATH` | Write a JSON status snapshot for the dashboard |
 
 ```text
@@ -127,25 +133,58 @@ a 4 ms deadline. Compare normal scheduling with `SCHED_FIFO`:
 
 ```bash
 docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
-  build/vrm_manager config/demo_cpu_contention.yaml --no-rt --exit-after 30
+  build/vrm_manager config/demo_cpu_contention.yaml --no-rt --no-arbitration --exit-after 30
 docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
-  build/vrm_manager config/demo_cpu_contention.yaml --exit-after 30
+  build/vrm_manager config/demo_cpu_contention.yaml --no-arbitration --exit-after 30
 ```
 
-Measured over 30 s (about 3000 activations) with Docker Desktop on macOS:
+Measured over 30 s (3000 activations) with Docker Desktop on macOS,
+arbitration off to isolate the effect of scheduling:
 
-| Setup | Scheduling | Deadline misses | Max release latency |
+| Setup | Scheduling | Deadline misses | Max release latency (last 0.5 s) |
 |---|---|---|---|
-| brake_control alone on CPU 0 | SCHED_FIFO 80 | 16 | 0.37 ms |
-| with 2 CPU hogs on CPU 0 | SCHED_OTHER (`--no-rt`) | **342** (11 %) | 2.48 ms |
-| with 2 CPU hogs on CPU 0 | SCHED_FIFO 80 | **9** (0.3 %) | **0.01 ms** |
+| brake_control alone on CPU 0 | SCHED_FIFO 80 | 0 | 0.73 ms |
+| with 2 CPU hogs on CPU 0 | SCHED_OTHER (`--no-rt`) | **68** | 1.68 ms |
+| with 2 CPU hogs on CPU 0 | SCHED_FIFO 80 | **0** | **0.01 ms** |
 
-With `SCHED_FIFO` the hogs cause no additional misses: the remaining misses
-also happen with brake_control alone. They come from the virtual machine, not
-from other Linux tasks - `cyclictest` in the same container measures kernel
-wake-up latencies of up to 54 ms. Hard real-time needs native Linux with a
+The virtual machine itself occasionally stalls: `cyclictest` in the same
+container measures kernel wake-up latencies of up to 54 ms, so single misses
+can appear in any setup. Hard real-time needs native Linux with a
 `PREEMPT_RT` kernel and isolated CPUs; see
 [docs/architecture.md](docs/architecture.md#7-real-time-scheduling-and-supervision).
+
+### Demo: arbitration protects a mission-critical node
+
+In [`config/demo_arbitration.yaml`](config/demo_arbitration.yaml), perception
+(mission-critical, normal scheduling) needs 20 ms of CPU every 50 ms (40 %)
+with a 30 ms deadline, on CPU 0 next to brake_control (`SCHED_FIFO`) and two
+best-effort CPU hogs. Its fair share next to the hogs is only about 27 %.
+
+```bash
+docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/demo_arbitration.yaml --exit-after 30
+```
+
+```text
+WARN  arbitration: throttled map_renderer to 10% CPU (perception waits for CPU 74% of the time)
+WARN  arbitration: throttled infotainment to 10% CPU (perception keeps missing deadlines)
+WARN  arbitration: deactivated infotainment (perception keeps missing deadlines)
+WARN  arbitration: deactivated map_renderer (perception keeps missing deadlines)
+INFO  arbitration: reactivated map_renderer (no interference for 10 s)
+WARN  arbitration: deactivated map_renderer (perception keeps missing deadlines)
+```
+
+| perception over 30 s (600 activations) | Deadline misses | CPU |
+|---|---|---|
+| `--no-arbitration` | **600** (all) | 26.6 % |
+| with arbitration | **107** (mostly in the first seconds, while escalating) | 39.5 % |
+
+Scheduling priority *prevents* interference within microseconds; arbitration
+*contains* it within seconds, for nodes that cannot all be real-time.
+The same run also shows two other actions: `config/demo_memory_leak.yaml` now
+stops infotainment at 91 % of its memory limit instead of waiting for the OOM
+killer, and `config/test_rt_runaway.yaml` demotes a `SCHED_FIFO` node that uses
+80 % CPU against a 30 % budget, after which cpu.max holds it at 29 %.
 
 ### Demo: a memory leak does not affect the brake
 
@@ -170,9 +209,10 @@ infotainment            0.0%   100%   428.0Ki   128.0Mi   128.0Mi         0    1
 ```
 
 The kernel stops infotainment at exactly its limit, and brake_control keeps
-its 10 ms period (605 ticks in 6 seconds) because its memory and CPU are
-accounted separately. In phase 4 the manager will act on the rising memory
-before the OOM killer has to.
+its 10 ms period because its memory and CPU are accounted separately. With
+arbitration (phase 4, on by default) the manager stops infotainment gracefully
+at 90 % of its limit, before the OOM killer has to; the output above is from
+`--no-arbitration`.
 
 ## Dashboard
 
@@ -216,6 +256,16 @@ docker run --rm -v "$PWD":/workspace vrm-base build/vrm_manager config/test_safe
 system: demo_vehicle
 transition_timeout_ms: 3000
 heartbeat_timeout_ms: 1500             # No heartbeat for this long = hung
+
+arbitration:                           # All optional; these are the defaults
+  enabled: true
+  cpu_pressure_threshold: 0.25         # Protected node waits for CPU > 25%: throttle others
+  miss_rounds: 2                       # Misses in 2 rounds (0.5 s) in a row: full ladder
+  escalation_interval_s: 2             # Time between degradation steps
+  recovery_s: 5                        # Calm time before restoring one step (doubles on relapse)
+  throttle_cpu: 0.1                    # cpu.max of throttled nodes
+  memory_stop_fraction: 0.9            # Stop gracefully at 90% of memory.max
+  rt_overrun_s: 1                      # SCHED_FIFO over its CPU budget this long: demote
 
 nodes:
   - name: brake_control
@@ -284,9 +334,10 @@ vehicle-resource-manager/
 
 ### Phase 4 - Arbitration
 
-* [ ] Detect resource pressure (PSI) and budget overruns
-* [ ] Degrade lower-criticality nodes (throttle, deactivate, stop) to protect safety-critical ones
-* [ ] Demo: a runaway infotainment node does not make brake_control miss a deadline
+* [x] Detect resource pressure (PSI), persistent deadline misses and budget overruns
+* [x] Degrade lower-criticality nodes (throttle, deactivate, stop) and restore them with hysteresis
+* [x] Stop nodes before the OOM killer; demote runaway SCHED_FIFO nodes
+* [x] Demos: CPU contention with and without arbitration, memory leak, real-time runaway
 
 ### Phase 5 - Observability
 

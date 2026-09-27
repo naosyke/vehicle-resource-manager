@@ -179,6 +179,28 @@ SystemManifest parse_manifest(const std::string& yaml_text) {
             manifest.transition_timeout =
                 std::chrono::milliseconds(root["transition_timeout_ms"].as<int>());
         }
+        if (const auto arbitration = root["arbitration"]) {
+            auto& config = manifest.arbitration;
+            const auto read = [&](const char* key, double& value, double min, double max) {
+                if (!arbitration[key]) return;
+                value = arbitration[key].as<double>();
+                if (value < min || value > max) {
+                    throw ManifestError(std::string("arbitration.") + key + " must be between " +
+                                        std::to_string(min) + " and " + std::to_string(max));
+                }
+            };
+            if (arbitration["enabled"]) config.enabled = arbitration["enabled"].as<bool>();
+            read("cpu_pressure_threshold", config.cpu_pressure_threshold, 0.01, 1.0);
+            read("escalation_interval_s", config.escalation_interval, 0.1, 3600);
+            read("recovery_s", config.recovery_seconds, 0.1, 3600);
+            read("throttle_cpu", config.throttle_cpu_cores, 0.01, 1024);
+            read("memory_stop_fraction", config.memory_stop_fraction, 0.1, 1.0);
+            read("rt_overrun_s", config.rt_overrun_seconds, 0.1, 3600);
+            if (arbitration["miss_rounds"]) {
+                config.miss_rounds = arbitration["miss_rounds"].as<int>();
+                if (config.miss_rounds < 1) throw ManifestError("arbitration.miss_rounds must be at least 1");
+            }
+        }
         if (root["heartbeat_timeout_ms"]) {
             manifest.heartbeat_timeout = std::chrono::milliseconds(root["heartbeat_timeout_ms"].as<int>());
         }

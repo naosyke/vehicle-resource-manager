@@ -5,6 +5,9 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
+#include <sched.h>
+
 #include <filesystem>
 #include <random>
 #include <sstream>
@@ -90,10 +93,16 @@ std::string_view to_string(NodeOutcome outcome) {
 }
 
 Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, bool realtime,
-                 std::uint64_t manager_id)
+                 bool arbitration, std::uint64_t manager_id)
     : manifest_(std::move(manifest)),
       cgroups_(std::move(cgroups)),
       realtime_(realtime),
+      arbiter_([&] {
+          auto config = manifest_.arbitration;
+          // Arbitration measures and acts through cgroups.
+          config.enabled = config.enabled && arbitration && cgroups_ != nullptr;
+          return config;
+      }()),
       client_(manager_id ? manager_id : random_manager_id()) {
     for (const auto* spec : startup_order(manifest_)) {
         RunningNode node{};
@@ -152,6 +161,8 @@ void Manager::reap_children() {
                                      ") " + description + " unexpectedly";
                 note(node.spec->criticality == Criticality::SafetyCritical ? Level::Error : Level::Warn,
                      node.spec->name, message);
+                arbiter_.forget(node.spec->name);
+                node.arbitration_state.clear();
                 schedule_restart(node);
             }
         }
@@ -191,6 +202,7 @@ void Manager::supervise_node(RunningNode& node) {
         ++node.restarts;
         node.scheduling_checked = false;
         if (start_node(node)) {
+            arbiter_.forget(spec.name);
             note(Level::Info, spec.name, spec.name + " restarted (" + std::to_string(node.restarts) + " restarts)");
         } else if (node.outcome != NodeOutcome::Skipped) {
             schedule_restart(node);
@@ -227,6 +239,7 @@ void Manager::supervise_node(RunningNode& node) {
 
     // Deadline misses, reported at most every 5 s per node.
     node.unreported_misses += heartbeat->window_misses;
+    node.misses_for_arbiter += heartbeat->window_misses;
     node.unreported_max_response_us = std::max(node.unreported_max_response_us, heartbeat->window_max_response_us);
     if (node.unreported_misses > 0 && now - node.misses_reported_at >= kMissReportInterval) {
         note(spec.criticality == Criticality::SafetyCritical ? Level::Error : Level::Warn, spec.name,
@@ -247,6 +260,115 @@ void Manager::supervise_node(RunningNode& node) {
                       *spec.resources.cpu_cores * 100.0);
         note(Level::Warn, spec.name, spec.name + " uses " + text + " (not enforceable for SCHED_FIFO)");
         node.rt_overrun_reported_at = now;
+    }
+}
+
+void Manager::arbitrate() {
+    if (!arbiter_.config().enabled) return;
+
+    std::vector<ArbiterNode> inputs;
+    for (auto& node : nodes_) {
+        const auto& spec = *node.spec;
+        ArbiterNode input;
+        input.name = spec.name;
+        input.criticality = spec.criticality;
+        input.priority = spec.priority;
+        input.cpus = spec.resources.cpus;
+        input.active = node.running && node.outcome == NodeOutcome::Active;
+        input.cpu_percent = node.cpu_percent;
+        input.cpu_pressure = node.cpu_pressure;
+        input.missed_deadlines = node.misses_for_arbiter > 0;
+        node.misses_for_arbiter = 0;
+        if (spec.resources.cpu_cores) input.cpu_budget_percent = *spec.resources.cpu_cores * 100.0;
+        if (spec.resources.memory_bytes && node.in_cgroup) {
+            input.memory_fraction = static_cast<double>(node.usage.memory_current) /
+                                    static_cast<double>(*spec.resources.memory_bytes);
+        }
+        const auto heartbeat = client_.heartbeat(spec.name);
+        input.realtime = heartbeat && heartbeat->pid == node.pid && heartbeat->sched_policy != "SCHED_OTHER";
+        inputs.push_back(input);
+    }
+
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    for (const auto& action : arbiter_.decide(inputs, now)) {
+        apply(action);
+    }
+}
+
+void Manager::apply(const ArbiterAction& action) {
+    auto* node = find(action.node);
+    if (!node || !node->running) return;
+    const auto& spec = *node->spec;
+    const auto alive = [&] { return is_running(*node); };
+    char limit[32];
+    std::snprintf(limit, sizeof(limit), "%.0f%%", arbiter_.config().throttle_cpu_cores * 100.0);
+
+    try {
+        switch (action.type) {
+            case ArbiterActionType::Throttle:
+                cgroups_->set_cpu_max(spec.name, arbiter_.config().throttle_cpu_cores);
+                node->arbitration_state = "throttled";
+                note(Level::Warn, spec.name,
+                     "arbitration: throttled " + spec.name + " to " + limit + " CPU (" + action.reason + ")");
+                break;
+            case ArbiterActionType::Unthrottle:
+                cgroups_->set_cpu_max(spec.name, spec.resources.cpu_cores);
+                node->arbitration_state.clear();
+                note(Level::Info, spec.name, "arbitration: restored the CPU limit of " + spec.name + " (" + action.reason + ")");
+                break;
+            case ArbiterActionType::Deactivate:
+                client_.request(spec.name, Transition::Deactivate, manifest_.transition_timeout, alive);
+                node->arbitration_state = "deactivated";
+                note(Level::Warn, spec.name, "arbitration: deactivated " + spec.name + " (" + action.reason + ")");
+                break;
+            case ArbiterActionType::Reactivate:
+                client_.request(spec.name, Transition::Activate, manifest_.transition_timeout, alive);
+                node->arbitration_state = "throttled";
+                note(Level::Info, spec.name, "arbitration: reactivated " + spec.name + " (" + action.reason + ")");
+                break;
+            case ArbiterActionType::Stop:
+            case ArbiterActionType::StopBeforeOom: {
+                const bool before_oom = action.type == ArbiterActionType::StopBeforeOom;
+                // Expected exit: no "unexpected" report and no restart.
+                node->outcome = NodeOutcome::Stopped;
+                node->detail = "stopped by arbitration: " + action.reason;
+                node->arbitration_state = "stopped";
+                note(Level::Warn, spec.name,
+                     "arbitration: stopping " + spec.name + (before_oom ? " before the OOM killer does" : "") + " (" +
+                         action.reason + ")");
+                const auto status = client_.status(spec.name);
+                if (status && status->state == State::Active) {
+                    client_.request(spec.name, Transition::Deactivate, manifest_.transition_timeout, alive);
+                }
+                client_.request(spec.name, Transition::Shutdown, manifest_.transition_timeout, alive);
+                break;
+            }
+            case ArbiterActionType::DemoteRealtime:
+                demote_to_normal_scheduling(*node);
+                node->arbitration_state = "demoted";
+                note(Level::Error, spec.name,
+                     "arbitration: demoted " + spec.name + " to SCHED_OTHER so its cgroup CPU limit applies (" +
+                         action.reason + ")");
+                break;
+        }
+    } catch (const std::exception& error) {
+        note(Level::Error, spec.name, "arbitration: " + std::string(to_string(action.type)) + " of " + spec.name +
+                                          " failed: " + error.what());
+    }
+    node->arbitration_reason = action.reason;
+}
+
+void Manager::demote_to_normal_scheduling(RunningNode& node) {
+    // The policy is per thread: switch every thread of the node (incl. DDS threads).
+    const std::string tasks = "/proc/" + std::to_string(node.pid) + "/task";
+    if (DIR* directory = opendir(tasks.c_str())) {
+        while (const dirent* entry = readdir(directory)) {
+            const int tid = std::atoi(entry->d_name);
+            if (tid <= 0) continue;
+            sched_param param{};
+            sched_setscheduler(tid, SCHED_OTHER, &param);
+        }
+        closedir(directory);
     }
 }
 
@@ -332,7 +454,8 @@ bool Manager::start() {
             return false;
         }
     }
-    note(Level::Info, "", "startup complete");
+    note(Level::Info, "", std::string("startup complete; arbitration ") +
+                              (arbiter_.config().enabled ? "enabled" : "disabled"));
     write_status();
     print_summary();
     return true;
@@ -366,6 +489,10 @@ void Manager::supervise(std::chrono::milliseconds duration, std::chrono::millise
             if (node.in_cgroup && node.running) sample_if_stale(node);
             supervise_node(node);
         }
+        if (now - last_arbitration_ >= std::chrono::milliseconds(500)) {
+            last_arbitration_ = now;
+            arbitrate();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 }
@@ -378,6 +505,8 @@ void Manager::sample_resources(RunningNode& node) {
     if (node.sampled_at.time_since_epoch().count() > 0 && elapsed_us > 0) {
         node.cpu_percent = 100.0 * static_cast<double>(usage.cpu_usage_usec - node.usage.cpu_usage_usec) /
                            static_cast<double>(elapsed_us);
+        node.cpu_pressure = static_cast<double>(usage.cpu_pressure_usec - node.usage.cpu_pressure_usec) /
+                            static_cast<double>(elapsed_us);
     }
     node.usage = usage;
     node.sampled_at = now;
@@ -407,6 +536,7 @@ void Manager::write_status() {
     std::ostringstream json;
     json << "{\"system\":" << json_string(manifest_.name) << ",\"timestamp\":" << std::fixed << now_seconds()
          << ",\"cgroups\":" << (cgroups_ ? "true" : "false")
+         << ",\"arbitration\":" << (arbiter_.config().enabled ? "true" : "false")
          << ",\"available_cpus\":" << json_int_list(cgroups_ ? cgroups_->available_cpus() : std::vector<int>{})
          << ",\"nodes\":[";
     for (std::size_t i = 0; i < nodes_.size(); ++i) {
@@ -431,6 +561,10 @@ void Manager::write_status() {
         json << ",\"memory_bytes\":";
         if (spec.resources.memory_bytes) json << *spec.resources.memory_bytes; else json << "null";
         json << ",\"cpus\":" << json_int_list(spec.resources.cpus) << "}";
+        json << ",\"arbitration\":{\"level\":" << arbiter_.level(spec.name)
+             << ",\"state\":" << json_string(node.arbitration_state)
+             << ",\"reason\":" << json_string(node.arbitration_reason) << "}"
+             << ",\"cpu_pressure\":" << (node.running ? node.cpu_pressure : 0.0);
         json << ",\"restart_policy\":" << json_string(to_string(spec.restart)) << ",\"restarts\":" << node.restarts
              << ",\"restart_pending\":" << (node.restart_pending ? "true" : "false");
 
@@ -524,7 +658,8 @@ void Manager::print_timing() {
         const std::string scheduling =
             heartbeat->sched_policy + (heartbeat->sched_priority ? " " + std::to_string(heartbeat->sched_priority) : "");
         std::printf("%-20s %-14s %9s %9s %9s %9s %8llu %8d\n", node.spec->name.c_str(), scheduling.c_str(),
-                    format_ms(heartbeat->period_us).c_str(), format_ms(heartbeat->deadline_us).c_str(),
+                    format_ms(heartbeat->period_us).c_str(),
+                    heartbeat->deadline_us ? format_ms(heartbeat->deadline_us).c_str() : "-",
                     format_ms(heartbeat->window_max_response_us).c_str(),
                     format_ms(heartbeat->window_max_latency_us).c_str(),
                     static_cast<unsigned long long>(heartbeat->total_misses), node.restarts);

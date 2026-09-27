@@ -19,6 +19,7 @@ add_library(vrm_core
   src/core/log.cpp
   src/core/cgroup.cpp
   src/core/deadline_monitor.cpp
+  src/core/arbiter.cpp
 )
 target_include_directories(vrm_core PUBLIC include)
 target_link_libraries(vrm_core PUBLIC yaml-cpp)
@@ -57,6 +58,7 @@ add_executable(vrm_unit_tests
   tests/test_manifest.cpp
   tests/test_cgroup_helpers.cpp
   tests/test_deadline_monitor.cpp
+  tests/test_arbiter.cpp
 )
 target_link_libraries(vrm_unit_tests PRIVATE vrm_core GTest::gtest_main)
 include(GoogleTest)
@@ -105,6 +107,28 @@ add_test(NAME realtime_priority_is_applied
     sleep 1.5 && grep -q '\"name\":\"brake_control\",.*\"policy\":\"SCHED_FIFO\",\"priority\":80' realtime.json; \
     status=$?; wait; exit $status")
 set_tests_properties(realtime_priority_is_applied PROPERTIES SKIP_RETURN_CODE 77)
+
+# Arbitration (needs a writable cgroupfs, e.g. --privileged --cgroupns=private; skipped otherwise).
+set(NEEDS_CGROUPS "test -w /sys/fs/cgroup/cgroup.subtree_control && chrt -f 1 true 2>/dev/null || exit 77")
+
+add_test(NAME arbitration_throttles_hogs
+  COMMAND sh -c "${NEEDS_CGROUPS}; $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/demo_arbitration.yaml \
+    --exit-after 4 --report-interval 0 --status-file arbitration.json > /dev/null \
+    && grep -q 'arbitration: throttled' arbitration.json")
+
+add_test(NAME arbitration_stops_before_oom
+  COMMAND sh -c "${NEEDS_CGROUPS}; $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/demo_memory_leak.yaml \
+    --exit-after 5 --report-interval 0 --status-file oom.json > /dev/null \
+    && grep -q 'before the OOM killer' oom.json && grep -q '\"oom_kills\":0' oom.json \
+    && ! grep -q '\"oom_kills\":[1-9]' oom.json")
+
+add_test(NAME arbitration_demotes_runaway_realtime_node
+  COMMAND sh -c "${NEEDS_CGROUPS}; $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_rt_runaway.yaml \
+    --exit-after 4 --report-interval 0 --status-file runaway.json > /dev/null \
+    && grep -q 'demoted planner to SCHED_OTHER' runaway.json")
+
+set_tests_properties(arbitration_throttles_hogs arbitration_stops_before_oom
+  arbitration_demotes_runaway_realtime_node PROPERTIES SKIP_RETURN_CODE 77)
 
 # The status file for the dashboard is valid JSON with the final node states.
 add_test(NAME status_file_for_dashboard

@@ -32,6 +32,23 @@ std::string_view to_string(RestartPolicy policy);
 // Default: safety- and mission-critical nodes restart, best-effort nodes do not.
 RestartPolicy default_restart_policy(Criticality criticality);
 
+// Settings of the resource arbiter (see vrm/arbiter.hpp).
+struct ArbitrationConfig {
+    bool enabled = true;
+    // Waiting for CPU (PSI) above this share of time allows throttling only;
+    // it also includes waits for more critical nodes, which is legitimate.
+    double cpu_pressure_threshold = 0.25;
+    // Deadline misses in this many consecutive rounds (0.5 s each) allow the
+    // full ladder; a single spike (e.g. a VM stall) is ignored.
+    int miss_rounds = 2;
+    double escalation_interval = 2.0;      // Seconds between two degradation steps.
+    double recovery_seconds = 5.0;         // Calm time before restoring one step; doubles
+                                           // (up to 8x) when interference returns right after.
+    double throttle_cpu_cores = 0.1;       // cpu.max for throttled nodes.
+    double memory_stop_fraction = 0.9;     // Stop gracefully at this share of memory.max.
+    double rt_overrun_seconds = 1.0;       // How long a SCHED_FIFO node may exceed its budget.
+};
+
 struct ResourceBudget {
     std::optional<double> cpu_cores;        // e.g. 0.5 = half a core (cgroup cpu.max).
     std::optional<std::uint64_t> memory_bytes;  // Hard limit (cgroup memory.max).
@@ -55,6 +72,7 @@ struct SystemManifest {
     std::chrono::milliseconds transition_timeout{3000};
     // A node that sends no heartbeat for this long is considered hung.
     std::chrono::milliseconds heartbeat_timeout{1500};
+    ArbitrationConfig arbitration;
     std::vector<NodeSpec> nodes;
 
     const NodeSpec* find(std::string_view node_name) const;

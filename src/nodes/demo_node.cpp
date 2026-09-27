@@ -4,7 +4,8 @@
 //   vrm_demo_node --name infotainment --memory-mb 64 --fail-on activate
 //
 // --period-ms  Tick period while Active.
-// --work-ms    CPU time burned per tick (busy loop), to model computation.
+// --work-ms    CPU time burned per tick (busy loop on the thread's CPU clock),
+//              to model computation.
 // --memory-mb  Memory allocated and touched in on_configure, freed in on_cleanup.
 // --leak-mb-per-sec  Memory allocated (and never freed) per second while Active,
 //              to model a runaway process.
@@ -13,6 +14,8 @@
 // --no-deadline  Batch work: measure timing but never count deadline misses.
 // --crash-after-sec  Abort (SIGABRT) this many seconds after activation.
 // --hang-after-sec   Stop responding (endless loop) this many seconds after activation.
+#include <time.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -122,15 +125,22 @@ protected:
             for (volatile bool hung = true; hung;) {
             }
         }
-        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(options_.work_ms);
-        while (std::chrono::steady_clock::now() < until) {
-            // Busy loop to consume CPU like a real computation would.
+        // Burn `work_ms` of CPU time (not wall time): like a real computation,
+        // the tick takes longer when other tasks get the CPU in between.
+        const auto until = thread_cpu_time() + std::chrono::milliseconds(options_.work_ms);
+        while (thread_cpu_time() < until) {
         }
         ++ticks_;
         leak();
     }
 
 private:
+    static std::chrono::nanoseconds thread_cpu_time() {
+        timespec now{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+        return std::chrono::seconds(now.tv_sec) + std::chrono::nanoseconds(now.tv_nsec);
+    }
+
     void leak() {
         if (options_.leak_mb_per_sec <= 0.0) return;
         const auto now = std::chrono::steady_clock::now();

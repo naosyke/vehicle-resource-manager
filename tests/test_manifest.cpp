@@ -130,6 +130,25 @@ nodes:
     EXPECT_EQ(manifest.nodes[0].max_restarts, 3);
 }
 
+TEST(Manifest, ArbitrationSettings) {
+    const auto manifest = parse_manifest(R"(
+arbitration:
+  enabled: true
+  cpu_pressure_threshold: 0.2
+  recovery_s: 10
+  throttle_cpu: 0.05
+nodes:
+  - {name: a, executable: x}
+)");
+    EXPECT_TRUE(manifest.arbitration.enabled);
+    EXPECT_DOUBLE_EQ(manifest.arbitration.cpu_pressure_threshold, 0.2);
+    EXPECT_DOUBLE_EQ(manifest.arbitration.recovery_seconds, 10);
+    EXPECT_DOUBLE_EQ(manifest.arbitration.throttle_cpu_cores, 0.05);
+    EXPECT_DOUBLE_EQ(manifest.arbitration.memory_stop_fraction, 0.9);  // Default.
+    EXPECT_THROW(parse_manifest("arbitration: {cpu_pressure_threshold: 2}\nnodes: [{name: a, executable: x}]"),
+                 ManifestError);
+}
+
 TEST(Manifest, RejectsInvalidRestartSettings) {
     EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, restart: always}]"), ManifestError);
     EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, max_restarts: -1}]"), ManifestError);

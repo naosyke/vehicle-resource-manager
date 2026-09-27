@@ -33,8 +33,12 @@ public:
     // Called when a node reports a new state (or a failed request).
     using StateListener = std::function<void(const std::string& node, const NodeStatus& status)>;
 
-    LifecycleClient();
+    // `manager_id` identifies this manager run; only nodes started with it
+    // (VRM_MANAGER_ID) are commanded and tracked.
+    explicit LifecycleClient(std::uint64_t manager_id);
     ~LifecycleClient();
+
+    std::uint64_t manager_id() const { return manager_id_; }
 
     void set_state_listener(StateListener listener) { listener_ = std::move(listener); }
 
@@ -59,6 +63,7 @@ private:
     std::unique_ptr<Dds> dds_;
     std::map<std::string, NodeStatus> latest_;
     StateListener listener_;
+    std::uint64_t manager_id_;
     std::uint32_t next_request_id_ = 1;
 };
 

@@ -105,6 +105,15 @@ sequenceDiagram
     N-->>M: status active (request 2, success)
 ```
 
+**Manager id.** Every manager run picks a random 64-bit id and passes it to
+the nodes it starts through the `VRM_MANAGER_ID` environment variable. Both
+topics are keyed by `(manager_id, node)`: a node ignores commands from other
+managers, and a manager ignores status from other systems' nodes. Without
+this, two systems that use the same node names on one network (for example
+two containers on the same Docker network) would stop each other's nodes,
+because DDS discovery connects them automatically. It also keeps request ids
+unambiguous when a manager restarts.
+
 **Resend and idempotency.** Because the command topic is volatile, a command
 written before DDS discovery has matched the node's reader would be lost.
 The manager therefore resends the command every 300 ms until the node replies

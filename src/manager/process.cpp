@@ -9,6 +9,8 @@
 #include <cstring>
 #include <stdexcept>
 
+extern char** environ;
+
 namespace vrm {
 
 std::string resolve_executable(const std::string& executable) {
@@ -56,13 +58,19 @@ bool join_cgroup(const char* procs_path) {
 }  // namespace
 
 pid_t spawn_process(const std::string& executable, const std::vector<std::string>& args,
-                    const std::string& cgroup_procs) {
+                    const std::string& cgroup_procs, const std::vector<std::string>& extra_env) {
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>(executable.c_str()));
     for (const auto& arg : args) {
         argv.push_back(const_cast<char*>(arg.c_str()));
     }
     argv.push_back(nullptr);
+
+    // The environment is prepared before fork(); the child must not allocate.
+    std::vector<char*> envp;
+    for (char** variable = environ; *variable; ++variable) envp.push_back(*variable);
+    for (const auto& variable : extra_env) envp.push_back(const_cast<char*>(variable.c_str()));
+    envp.push_back(nullptr);
 
     const pid_t pid = fork();
     if (pid < 0) {
@@ -78,7 +86,7 @@ pid_t spawn_process(const std::string& executable, const std::vector<std::string
             write_stderr("\n");
             _exit(126);
         }
-        execvp(argv[0], argv.data());
+        execvpe(argv[0], argv.data(), envp.data());
         write_stderr("cannot execute ");
         write_stderr(argv[0]);
         write_stderr("\n");

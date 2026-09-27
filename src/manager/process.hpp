@@ -17,7 +17,7 @@ std::string resolve_executable(const std::string& executable);
 // is set, the child moves itself into that cgroup before exec, so the
 // resource limits apply from its first instruction. Throws on failure.
 pid_t spawn_process(const std::string& executable, const std::vector<std::string>& args,
-                    const std::string& cgroup_procs = "");
+                    const std::string& cgroup_procs = "", const std::vector<std::string>& extra_env = {});
 
 struct ExitInfo {
     pid_t pid;

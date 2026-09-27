@@ -30,7 +30,8 @@ std::string_view to_string(NodeOutcome outcome);
 class Manager {
 public:
     // Without a CgroupManager, resource budgets are not enforced.
-    Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups);
+    // `manager_id` identifies this run (random when 0).
+    Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, std::uint64_t manager_id = 0);
     ~Manager();
 
     // Returns false when a safety-critical node could not be started.

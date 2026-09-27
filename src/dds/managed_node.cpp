@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <csignal>
+#include <cstdlib>
 #include <thread>
 
 #include "vrm/dds_lifecycle.hpp"
@@ -48,6 +49,9 @@ ManagedNode::ManagedNode(std::string name, std::chrono::milliseconds tick_period
           [this] { return on_error(); },
       }),
       dds_(std::make_unique<Dds>()) {
+    if (const char* id = std::getenv(dds_lifecycle::kManagerIdEnv)) {
+        manager_id_ = std::strtoull(id, nullptr, 10);
+    }
     // Report every state change, including transition states.
     machine_.set_observer([this](State, State to) {
         if (!is_primary(to)) {
@@ -60,7 +64,7 @@ ManagedNode::~ManagedNode() = default;
 
 void ManagedNode::publish_status(State state, std::uint32_t request_id, bool success,
                                  const std::string& message) {
-    dds_->status_writer.write(msg::LifecycleStatus(name_, dds_lifecycle::to_msg(state), request_id,
+    dds_->status_writer.write(msg::LifecycleStatus(manager_id_, name_, dds_lifecycle::to_msg(state), request_id,
                                                    success, message, static_cast<int32_t>(getpid())));
 }
 
@@ -106,6 +110,10 @@ int ManagedNode::run() {
 
         for (const auto& sample : dds_->command_reader.take()) {
             if (!sample.info().valid() || sample.data().node() != name_) {
+                continue;
+            }
+            // Ignore other systems' managers that happen to use the same node names.
+            if (manager_id_ != 0 && sample.data().manager_id() != manager_id_) {
                 continue;
             }
             handle_command(sample.data().request_id(), dds_lifecycle::from_msg(sample.data().transition()));

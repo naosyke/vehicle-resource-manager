@@ -48,6 +48,7 @@ private:
     void shutdown_gracefully();
 
     std::string name_;
+    std::uint64_t manager_id_ = 0;  // From VRM_MANAGER_ID; 0 accepts any manager.
     std::chrono::milliseconds tick_period_;
     LifecycleStateMachine machine_;
     std::unique_ptr<Dds> dds_;

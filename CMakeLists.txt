@@ -73,6 +73,14 @@ add_test(NAME safety_critical_failure_aborts_startup
   COMMAND vrm_manager ${CMAKE_SOURCE_DIR}/config/test_safety_failure.yaml --exit-after 1)
 set_tests_properties(safety_critical_failure_aborts_startup PROPERTIES WILL_FAIL TRUE)
 
+# Two systems with the same node names on one network must not control each
+# other's nodes: system A stops while B is running; B's nodes must stay up.
+add_test(NAME two_systems_do_not_interfere
+  COMMAND sh -c "($<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_system.yaml --exit-after 0.5 --no-cgroups > /dev/null &) \
+    && $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_system.yaml --exit-after 3 --no-cgroups \
+    --status-file two_systems.json > /dev/null \
+    && ! grep -q '\"outcome\":\"exited\"' two_systems.json")
+
 # The status file for the dashboard is valid JSON with the final node states.
 add_test(NAME status_file_for_dashboard
   COMMAND sh -c "$<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_system.yaml --exit-after 1 \

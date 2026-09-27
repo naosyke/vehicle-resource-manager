@@ -6,10 +6,12 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <random>
 #include <sstream>
 #include <thread>
 
 #include "process.hpp"
+#include "vrm/dds_lifecycle.hpp"
 #include "vrm/log.hpp"
 #include "vrm/managed_node.hpp"
 
@@ -50,6 +52,14 @@ std::string json_int_list(const std::vector<int>& values) {
     return out + "]";
 }
 
+std::uint64_t random_manager_id() {
+    std::random_device device;
+    std::mt19937_64 generator((static_cast<std::uint64_t>(device()) << 32) ^ device());
+    std::uint64_t id = 0;
+    while (id == 0) id = generator();  // 0 means "no manager".
+    return id;
+}
+
 const char* level_name(int level) {
     return level == 0 ? "info" : level == 1 ? "warn" : "error";
 }
@@ -67,8 +77,10 @@ std::string_view to_string(NodeOutcome outcome) {
     return "unknown";
 }
 
-Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups)
-    : manifest_(std::move(manifest)), cgroups_(std::move(cgroups)) {
+Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, std::uint64_t manager_id)
+    : manifest_(std::move(manifest)),
+      cgroups_(std::move(cgroups)),
+      client_(manager_id ? manager_id : random_manager_id()) {
     for (const auto* spec : startup_order(manifest_)) {
         RunningNode node{};
         node.spec = spec;
@@ -166,7 +178,9 @@ bool Manager::start_node(RunningNode& node) {
             cgroup_procs = cgroups_->create_group(spec.name, spec.resources);
             node.in_cgroup = true;
         }
-        node.pid = spawn_process(executable, args, cgroup_procs);
+        const std::string manager_env =
+            std::string(dds_lifecycle::kManagerIdEnv) + "=" + std::to_string(client_.manager_id());
+        node.pid = spawn_process(executable, args, cgroup_procs, {manager_env});
     } catch (const std::exception& error) {
         node.outcome = NodeOutcome::Failed;
         node.detail = error.what();
@@ -196,7 +210,8 @@ bool Manager::start_node(RunningNode& node) {
 }
 
 bool Manager::start() {
-    note(Level::Info, "", "starting system '" + manifest_.name + "' with " + std::to_string(nodes_.size()) + " nodes");
+    note(Level::Info, "", "starting system '" + manifest_.name + "' with " + std::to_string(nodes_.size()) +
+                              " nodes (manager id " + std::to_string(client_.manager_id()) + ")");
     for (auto& node : nodes_) {
         if (g_stop_requested) {
             return true;

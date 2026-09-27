@@ -33,8 +33,10 @@ public:
     // Without a CgroupManager, resource budgets are not enforced. With
     // `realtime` false, nodes run with normal scheduling regardless of their
     // priority (for comparisons). `manager_id` identifies this run (random when 0).
+    // With `criticality_weights` false every node gets cpu.weight 100 unless
+    // its manifest sets one (for comparisons).
     Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, bool realtime = true,
-            bool arbitration = true, std::uint64_t manager_id = 0);
+            bool arbitration = true, bool criticality_weights = true, std::uint64_t manager_id = 0);
     ~Manager();
 
     // Returns false when a safety-critical node could not be started.
@@ -91,6 +93,10 @@ private:
     };
 
     int rt_priority(const NodeSpec& spec) const { return realtime_ ? spec.priority : 0; }
+    int cpu_weight(const NodeSpec& spec) const {
+        return spec.resources.cpu_weight ? *spec.resources.cpu_weight
+                                         : criticality_weights_ ? default_cpu_weight(spec.criticality) : 100;
+    }
     void supervise_node(RunningNode& node);
     void arbitrate();
     void apply(const ArbiterAction& action);
@@ -119,6 +125,7 @@ private:
     SystemManifest manifest_;
     std::unique_ptr<CgroupManager> cgroups_;
     bool realtime_;
+    bool criticality_weights_;
     Arbiter arbiter_;
     std::chrono::steady_clock::time_point last_arbitration_;
     bool stopping_ = false;

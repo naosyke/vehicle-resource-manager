@@ -278,10 +278,12 @@ function renderNodes(data) {
     if (node.restarts) flags.push(status("warning", `restarted ${node.restarts}×`));
     const arbitration = node.arbitration || {};
     if (arbitration.state) {
-      const labels = {throttled: "throttled by arbitration", deactivated: "deactivated by arbitration",
+      const labels = {yielding: "yielding CPU (weight lowered)", throttled: "throttled by arbitration",
+                      deactivated: "deactivated by arbitration",
                       stopped: "stopped by arbitration", demoted: "demoted to SCHED_OTHER"};
       flags.push(`<span title="${escapeHtml(arbitration.reason || "")}">${status(
-        arbitration.state === "throttled" ? "warning" : "critical", labels[arbitration.state] || arbitration.state)}</span>`);
+        arbitration.state === "yielding" || arbitration.state === "throttled" ? "warning" : "critical",
+        labels[arbitration.state] || arbitration.state)}</span>`);
     }
     // An OOM exit is already the node's status line.
     if (usage && usage.oom_kills && node.outcome !== "exited") flags.push(status("critical", `OOM killed ×${usage.oom_kills}`));
@@ -296,6 +298,7 @@ function renderNodes(data) {
       ? `${formatBytes(usage.memory_bytes)} / ${memLimit ? formatBytes(memLimit) : "no limit"} · peak ${formatBytes(usage.memory_peak_bytes)}`
       : "not measured";
     const pinnedText = (budget.cpus.length ? `CPU ${budget.cpus.join(", ")}` : "any CPU") +
+      (budget.cpu_weight ? ` · weight ${budget.cpu_weight}` : "") +
       (timing ? ` · every ${formatMs(timing.period_us).replace(".00", "")}` : "");
     const schedText = sched.policy
       ? (sched.priority ? `${sched.policy} ${sched.priority}` : sched.policy)

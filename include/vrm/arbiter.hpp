@@ -5,17 +5,21 @@
 // CPU interference: a less critical node that can run on the same CPUs as a
 // protected (safety- or mission-critical) node is degraded one step at a time:
 //
-//   level 0 normal -> 1 throttled (low cpu.max) -> 2 deactivated -> 3 stopped
+//   level 0 normal
+//   -> 1 yielding    (cpu.weight lowered: still uses idle CPU, but gives way)
+//   -> 2 throttled   (cpu.max: capped even when the CPU is idle)
+//   -> 3 deactivated (lifecycle inactive, process alive)
+//   -> 4 stopped
 //
-// - A protected node waiting for CPU (PSI) above the threshold allows
-//   throttling only: part of that wait is caused by more critical nodes.
+// - A protected node waiting for CPU (PSI) above the threshold allows only
+//   lowering the weight, which costs nothing when the CPU is idle.
 // - A protected node missing deadlines in several consecutive rounds (actual
 //   harm) allows the whole ladder. A single spike is ignored.
 // - A real-time (SCHED_FIFO) node can only be disturbed by other real-time
 //   nodes, so its misses never degrade normal nodes.
 //
 // After a calm period the most critical degraded node is restored one step
-// (throttled / deactivated nodes only; stopped nodes stay stopped). If the
+// (yielding / throttled / deactivated nodes; stopped nodes stay stopped). If the
 // interference comes back right after a restore, the calm period doubles.
 //
 // Memory: a non-safety node close to its memory limit is stopped gracefully
@@ -50,6 +54,8 @@ struct ArbiterNode {
 };
 
 enum class ArbiterActionType {
+    LowerWeight,       // Set cpu.weight to lowered_cpu_weight.
+    RestoreWeight,     // Restore the node's own cpu.weight.
     Throttle,          // Set cpu.max to throttle_cpu_cores.
     Deactivate,        // Lifecycle deactivate; the process stays alive.
     Stop,              // Lifecycle shutdown.
@@ -79,7 +85,7 @@ public:
     // `now` is in seconds on any monotonic clock.
     std::vector<ArbiterAction> decide(const std::vector<ArbiterNode>& nodes, double now);
 
-    // Degradation level of a node (0 = normal .. 3 = stopped).
+    // Degradation level of a node (0 = normal .. 4 = stopped).
     int level(const std::string& node) const;
 
     // The node was restarted or exited: forget its level and history.

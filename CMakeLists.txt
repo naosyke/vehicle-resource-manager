@@ -111,10 +111,18 @@ set_tests_properties(realtime_priority_is_applied PROPERTIES SKIP_RETURN_CODE 77
 # Arbitration (needs a writable cgroupfs, e.g. --privileged --cgroupns=private; skipped otherwise).
 set(NEEDS_CGROUPS "test -w /sys/fs/cgroup/cgroup.subtree_control && chrt -f 1 true 2>/dev/null || exit 77")
 
-add_test(NAME arbitration_throttles_hogs
+# With equal weights the hogs starve perception, and the arbiter makes them yield.
+add_test(NAME arbitration_lowers_weights_of_hogs
   COMMAND sh -c "${NEEDS_CGROUPS}; $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/demo_arbitration.yaml \
-    --exit-after 4 --report-interval 0 --status-file arbitration.json > /dev/null \
-    && grep -q 'arbitration: throttled' arbitration.json")
+    --equal-weights --exit-after 4 --report-interval 0 --status-file arbitration.json > /dev/null \
+    && grep -q 'arbitration: lowered the CPU weight' arbitration.json")
+
+# With weights by criticality the nodes get their cgroup cpu.weight.
+add_test(NAME cpu_weights_follow_criticality
+  COMMAND sh -c "${NEEDS_CGROUPS}; $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/demo_arbitration.yaml \
+    --exit-after 1 --report-interval 0 --status-file weights.json > /dev/null \
+    && grep -q '\"name\":\"perception\",.*\"cpu_weight\":1000' weights.json \
+    && grep -q '\"name\":\"infotainment\",.*\"cpu_weight\":10}' weights.json")
 
 add_test(NAME arbitration_stops_before_oom
   COMMAND sh -c "${NEEDS_CGROUPS}; $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/demo_memory_leak.yaml \
@@ -127,7 +135,7 @@ add_test(NAME arbitration_demotes_runaway_realtime_node
     --exit-after 4 --report-interval 0 --status-file runaway.json > /dev/null \
     && grep -q 'demoted planner to SCHED_OTHER' runaway.json")
 
-set_tests_properties(arbitration_throttles_hogs arbitration_stops_before_oom
+set_tests_properties(arbitration_lowers_weights_of_hogs cpu_weights_follow_criticality arbitration_stops_before_oom
   arbitration_demotes_runaway_realtime_node PROPERTIES SKIP_RETURN_CODE 77)
 
 # The status file for the dashboard is valid JSON with the final node states.

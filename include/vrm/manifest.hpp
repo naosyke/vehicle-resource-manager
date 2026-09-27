@@ -44,13 +44,20 @@ struct ArbitrationConfig {
     double escalation_interval = 2.0;      // Seconds between two degradation steps.
     double recovery_seconds = 5.0;         // Calm time before restoring one step; doubles
                                            // (up to 8x) when interference returns right after.
+    int lowered_cpu_weight = 1;            // cpu.weight of nodes that must yield.
     double throttle_cpu_cores = 0.1;       // cpu.max for throttled nodes.
     double memory_stop_fraction = 0.9;     // Stop gracefully at this share of memory.max.
     double rt_overrun_seconds = 1.0;       // How long a SCHED_FIFO node may exceed its budget.
 };
 
+// Default cgroup cpu.weight (share of CPU when nodes compete) by criticality:
+// safety 10000, mission 1000, best effort 10. Unlike cpu.max it is not a cap:
+// idle CPU is still used by anyone.
+int default_cpu_weight(Criticality criticality);
+
 struct ResourceBudget {
     std::optional<double> cpu_cores;        // e.g. 0.5 = half a core (cgroup cpu.max).
+    std::optional<int> cpu_weight;          // 1-10000 (cgroup cpu.weight); default by criticality.
     std::optional<std::uint64_t> memory_bytes;  // Hard limit (cgroup memory.max).
     std::vector<int> cpus;                  // CPU affinity (cgroup cpuset.cpus).
 };

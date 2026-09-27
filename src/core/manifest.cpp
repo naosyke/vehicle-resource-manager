@@ -23,6 +23,15 @@ std::string_view to_string(RestartPolicy policy) {
     return policy == RestartPolicy::OnFailure ? "on-failure" : "never";
 }
 
+int default_cpu_weight(Criticality criticality) {
+    switch (criticality) {
+        case Criticality::SafetyCritical: return 10000;
+        case Criticality::MissionCritical: return 1000;
+        case Criticality::BestEffort: return 10;
+    }
+    return 100;
+}
+
 RestartPolicy default_restart_policy(Criticality criticality) {
     return criticality == Criticality::BestEffort ? RestartPolicy::Never : RestartPolicy::OnFailure;
 }
@@ -104,6 +113,12 @@ NodeSpec parse_node(const YAML::Node& yaml) {
             node.resources.cpu_cores = resources["cpu"].as<double>();
             if (*node.resources.cpu_cores <= 0.0) {
                 throw ManifestError("node '" + node.name + "': cpu must be positive");
+            }
+        }
+        if (resources["cpu_weight"]) {
+            node.resources.cpu_weight = resources["cpu_weight"].as<int>();
+            if (*node.resources.cpu_weight < 1 || *node.resources.cpu_weight > 10000) {
+                throw ManifestError("node '" + node.name + "': cpu_weight must be 1-10000");
             }
         }
         if (resources["memory"]) {
@@ -196,6 +211,12 @@ SystemManifest parse_manifest(const std::string& yaml_text) {
             read("throttle_cpu", config.throttle_cpu_cores, 0.01, 1024);
             read("memory_stop_fraction", config.memory_stop_fraction, 0.1, 1.0);
             read("rt_overrun_s", config.rt_overrun_seconds, 0.1, 3600);
+            if (arbitration["lowered_cpu_weight"]) {
+                config.lowered_cpu_weight = arbitration["lowered_cpu_weight"].as<int>();
+                if (config.lowered_cpu_weight < 1 || config.lowered_cpu_weight > 10000) {
+                    throw ManifestError("arbitration.lowered_cpu_weight must be 1-10000");
+                }
+            }
             if (arbitration["miss_rounds"]) {
                 config.miss_rounds = arbitration["miss_rounds"].as<int>();
                 if (config.miss_rounds < 1) throw ManifestError("arbitration.miss_rounds must be at least 1");

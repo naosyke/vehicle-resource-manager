@@ -1,14 +1,17 @@
-# Demo: arbitration protects a mission-critical node from CPU hogs.
+# Demo: protecting a mission-critical node from CPU hogs.
 #
 # perception (mission-critical, normal scheduling) shares CPU 0 with two
-# best-effort CPU hogs and brake_control (SCHED_FIFO). The hogs make
-# perception wait for CPU and miss its 30 ms deadline (it needs 40% of CPU 0,
-# but its fair share next to the hogs is only about 27%). The manager sees the
-# pressure (PSI) and the misses, and degrades the hogs step by step:
-# throttle (cpu.max 10%) -> deactivate -> stop - only as far as needed.
+# best-effort CPU hogs and brake_control (SCHED_FIFO). perception needs 40% of
+# CPU 0 with a 30 ms deadline; with equal shares it would get only about 27%.
 #
-#   ... build/vrm_manager config/demo_arbitration.yaml --exit-after 30
-#   ... build/vrm_manager config/demo_arbitration.yaml --no-arbitration --exit-after 30
+# 1. Default: cpu.weight by criticality (mission 1000, best effort 10).
+#    perception gets what it needs, the hogs use the rest - nobody is stopped.
+#      ... build/vrm_manager config/demo_arbitration.yaml --exit-after 30
+# 2. --equal-weights: all nodes weight 100. The arbiter sees the pressure (PSI)
+#    and the misses and degrades the hogs only as far as needed:
+#    lower weight -> throttle (cpu.max 10%) -> deactivate -> stop.
+#      ... build/vrm_manager config/demo_arbitration.yaml --equal-weights --exit-after 30
+# 3. --equal-weights --no-arbitration: nothing protects perception.
 system: demo_arbitration
 transition_timeout_ms: 3000
 

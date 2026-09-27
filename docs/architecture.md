@@ -169,6 +169,7 @@ flowchart TB
 | Manifest | cgroup file | Effect |
 |---|---|---|
 | `cpu: 0.5` | `cpu.max` = `50000 100000` | At most 50 ms of CPU time per 100 ms period; then the group is throttled |
+| `cpu_weight` (default by criticality) | `cpu.weight` | Share of CPU when groups compete: safety 10000, mission 1000, best effort 10. Not a cap - an idle CPU is used by anyone |
 | `memory: 64Mi` | `memory.max`, `memory.swap.max = 0` | Allocations beyond the limit trigger reclaim, then the OOM killer inside this group only |
 | `cpus: [0]` | `cpuset.cpus` = `0` | The node's threads may only run on CPU 0 |
 
@@ -221,6 +222,11 @@ child sets it with `sched_setscheduler()` between `fork()` and `exec()`
 and is inherited by the node's DDS threads. A `SCHED_FIFO` task runs as soon
 as it is ready and is only preempted by higher real-time priorities, so
 normal (`SCHED_OTHER`) tasks on the same CPU cannot delay it.
+
+When a node starts as `SCHED_FIFO`, it also locks its memory (`mlockall`)
+so page faults cannot stall a tick, and moves the helper threads DDS created
+(which inherited the real-time policy) to `SCHED_OTHER`, so communication
+never delays the periodic work.
 
 The node reports the policy the kernel actually applied in its heartbeat;
 the manager warns when it differs from the manifest (e.g. no `CAP_SYS_NICE`).
@@ -296,21 +302,34 @@ and real-time nodes that misbehave. The policy (`Arbiter`,
 the manager passes it the measurements of all nodes and carries out the
 actions it returns.
 
+### First line: CPU shares by criticality
+
+Before arbitration does anything, every node's cgroup gets a `cpu.weight`
+by criticality (safety 10000, mission 1000, best effort 10). When nodes
+compete, the CPU is split in that ratio; when a critical node sleeps, the
+others use the idle time. In the arbitration demo this alone lets perception
+meet every deadline while the best-effort hogs keep running on the rest of
+the CPU, and the arbiter never has to act. Unlike `cpu.max`, a weight never
+leaves a CPU idle.
+
 ### Degradation ladder
 
 ```mermaid
 stateDiagram-v2
     direction LR
-    Normal --> Throttled: interference
+    Normal --> Yielding: interference
+    Yielding --> Throttled: deadline misses persist
     Throttled --> Deactivated: deadline misses persist
     Deactivated --> Stopped: deadline misses persist
-    Throttled --> Normal: calm for recovery_s
+    Yielding --> Normal: calm for recovery_s
+    Throttled --> Yielding: calm for recovery_s
     Deactivated --> Throttled: calm for recovery_s
 ```
 
 | Level | Action | Effect |
 |---|---|---|
-| Throttled | `cpu.max` = `throttle_cpu` (10 %) | The node keeps working, slower |
+| Yielding | `cpu.weight` = `lowered_cpu_weight` (1) | The node still uses idle CPU but gives way to everyone else |
+| Throttled | `cpu.max` = `throttle_cpu` (10 %) | The node keeps working, slower, even when the CPU is idle |
 | Deactivated | lifecycle `deactivate` | Periodic work stops; the process stays alive and can resume instantly |
 | Stopped | lifecycle `shutdown` | The node is gone until the next start |
 
@@ -318,7 +337,7 @@ stateDiagram-v2
 
 | Signal | Source | Allows |
 |---|---|---|
-| A protected node waits for CPU more than `cpu_pressure_threshold` (25 %) | PSI `cpu.pressure` of its cgroup, difference of `total` between samples | Throttling only - part of the wait is caused by more critical nodes, which is legitimate. Ignored for `SCHED_FIFO` nodes: their only waits are for their own threads or other real-time tasks, which throttling normal tasks cannot help |
+| A protected node waits for CPU more than `cpu_pressure_threshold` (25 %) | PSI `cpu.pressure` of its cgroup, difference of `total` between samples | Lowering weights only (costs nothing when the CPU is idle) - part of the wait is caused by more critical nodes, which is legitimate. Ignored for `SCHED_FIFO` nodes: their only waits are for their own threads or other real-time tasks, which throttling normal tasks cannot help |
 | A protected node misses deadlines in `miss_rounds` (2) consecutive rounds | Heartbeats | The whole ladder - this is actual harm; a single spike (e.g. a VM stall) is ignored |
 
 Protected nodes are safety- and mission-critical ones. A victim must be

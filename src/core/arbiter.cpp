@@ -9,6 +9,8 @@ namespace vrm {
 
 std::string_view to_string(ArbiterActionType type) {
     switch (type) {
+        case ArbiterActionType::LowerWeight: return "lower_weight";
+        case ArbiterActionType::RestoreWeight: return "restore_weight";
         case ArbiterActionType::Throttle: return "throttle";
         case ArbiterActionType::Deactivate: return "deactivate";
         case ArbiterActionType::Stop: return "stop";
@@ -62,7 +64,7 @@ std::vector<ArbiterAction> Arbiter::decide(const std::vector<ArbiterNode>& nodes
         if (*node.memory_fraction < config_.memory_stop_fraction) continue;
         if (node.criticality == Criticality::SafetyCritical) continue;  // Never stopped by the arbiter.
         memory_stopped_[node.name] = true;
-        levels_[node.name] = 3;
+        levels_[node.name] = 4;
         actions.push_back({ArbiterActionType::StopBeforeOom, node.name,
                            "memory at " + percent(*node.memory_fraction) + " of its limit"});
     }
@@ -134,8 +136,8 @@ std::vector<ArbiterAction> Arbiter::decide(const std::vector<ArbiterNode>& nodes
                 }
             }
         };
-        consider(missing, 2);  // Up to "stop".
-        consider(waiting, 0);  // Throttle only.
+        consider(missing, 3);  // Up to "stop".
+        consider(waiting, 0);  // Lower the weight only.
         if (!victim) return actions;
 
         // Interference right after a restore: wait longer before the next one.
@@ -151,8 +153,9 @@ std::vector<ArbiterAction> Arbiter::decide(const std::vector<ArbiterNode>& nodes
                                                                   : " waits for CPU " +
                                                                         percent(protected_node->cpu_pressure) +
                                                                         " of the time");
-        const auto type = next == 1   ? ArbiterActionType::Throttle
-                          : next == 2 ? ArbiterActionType::Deactivate
+        const auto type = next == 1   ? ArbiterActionType::LowerWeight
+                          : next == 2 ? ArbiterActionType::Throttle
+                          : next == 3 ? ArbiterActionType::Deactivate
                                       : ArbiterActionType::Stop;
         actions.push_back({type, victim->name, reason});
         return actions;
@@ -170,14 +173,17 @@ std::vector<ArbiterAction> Arbiter::decide(const std::vector<ArbiterNode>& nodes
     };
     for (const auto& node : nodes) {
         const int current = level(node.name);
-        if (current < 1 || current > 2 || memory_stopped_[node.name]) continue;
+        if (current < 1 || current > 3 || memory_stopped_[node.name]) continue;
         if (!restore || order(&node) < order(restore)) restore = &node;
     }
     if (restore) {
         const int current = level(restore->name);
         levels_[restore->name] = current - 1;
         last_recovery_ = now;
-        actions.push_back({current == 2 ? ArbiterActionType::Reactivate : ArbiterActionType::Unthrottle,
+        const auto type = current == 3   ? ArbiterActionType::Reactivate
+                          : current == 2 ? ArbiterActionType::Unthrottle
+                                         : ArbiterActionType::RestoreWeight;
+        actions.push_back({type,
                            restore->name, "no interference for " + std::to_string(static_cast<int>(recovery_seconds_)) + " s"});
     }
     return actions;

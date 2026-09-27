@@ -37,29 +37,30 @@ TEST(Arbiter, NoActionWithoutInterference) {
     EXPECT_TRUE(arbiter.decide(system_on_cpu0(), 0).empty());
 }
 
-TEST(Arbiter, ThrottlesEveryBestEffortNodeBeforeDeactivatingAny) {
+TEST(Arbiter, DegradesEveryBestEffortNodeOneStepBeforeTheNext) {
     Arbiter arbiter;
     auto nodes = system_on_cpu0();
     nodes[1].missed_deadlines = true;  // perception misses deadlines...
 
     EXPECT_TRUE(arbiter.decide(nodes, -0.5).empty());  // ...but one round could be a spike.
-    auto first = arbiter.decide(nodes, 0);
-    ASSERT_EQ(first.size(), 1u);
-    EXPECT_EQ(first[0].type, ArbiterActionType::Throttle);
-    EXPECT_EQ(first[0].node, "infotainment");  // Biggest CPU user first.
-    EXPECT_EQ(first[0].reason, "perception keeps missing deadlines");
 
-    EXPECT_TRUE(arbiter.decide(nodes, 1.0).empty());  // Waits for the escalation interval.
+    std::vector<std::pair<ArbiterActionType, std::string>> steps;
+    for (double t = 0; t <= 6; t += 2) {
+        const auto actions = arbiter.decide(nodes, t);
+        ASSERT_EQ(actions.size(), 1u);
+        steps.emplace_back(actions[0].type, actions[0].node);
+        if (t == 0) EXPECT_EQ(actions[0].reason, "perception keeps missing deadlines");
+    }
+    EXPECT_TRUE(arbiter.decide(nodes, 7).empty());  // Waits for the escalation interval.
 
-    auto second = arbiter.decide(nodes, 2.0);
-    ASSERT_EQ(second.size(), 1u);
-    EXPECT_EQ(second[0].type, ArbiterActionType::Throttle);
-    EXPECT_EQ(second[0].node, "map_renderer");
-
-    auto third = arbiter.decide(nodes, 4.0);
-    ASSERT_EQ(third.size(), 1u);
-    EXPECT_EQ(third[0].type, ArbiterActionType::Deactivate);
-    EXPECT_EQ(third[0].node, "infotainment");
+    // Biggest CPU user first; both yield before either is throttled.
+    const std::vector<std::pair<ArbiterActionType, std::string>> expected = {
+        {ArbiterActionType::LowerWeight, "infotainment"},
+        {ArbiterActionType::LowerWeight, "map_renderer"},
+        {ArbiterActionType::Throttle, "infotainment"},
+        {ArbiterActionType::Throttle, "map_renderer"},
+    };
+    EXPECT_EQ(steps, expected);
 }
 
 TEST(Arbiter, DegradesUpToStopAndNeverTouchesMoreCriticalNodes) {
@@ -68,19 +69,19 @@ TEST(Arbiter, DegradesUpToStopAndNeverTouchesMoreCriticalNodes) {
     nodes[1].missed_deadlines = true;
 
     std::vector<std::pair<ArbiterActionType, std::string>> steps;
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 30; ++i) {
         for (const auto& action : arbiter.decide(nodes, i * 1.0)) steps.emplace_back(action.type, action.node);
     }
 
-    // Two best-effort nodes x three levels; perception itself and brake are never degraded.
-    ASSERT_EQ(steps.size(), 6u);
+    // Two best-effort nodes x four levels; perception itself and brake are never degraded.
+    ASSERT_EQ(steps.size(), 8u);
     EXPECT_EQ(steps.back().first, ArbiterActionType::Stop);
     for (const auto& step : steps) {
         EXPECT_NE(step.second, "perception");
         EXPECT_NE(step.second, "brake_control");
     }
-    EXPECT_EQ(arbiter.level("infotainment"), 3);
-    EXPECT_EQ(arbiter.level("map_renderer"), 3);
+    EXPECT_EQ(arbiter.level("infotainment"), 4);
+    EXPECT_EQ(arbiter.level("map_renderer"), 4);
 }
 
 TEST(Arbiter, SafetyPressureMayDegradeMissionNodes) {
@@ -96,7 +97,7 @@ TEST(Arbiter, SafetyPressureMayDegradeMissionNodes) {
     EXPECT_EQ(actions[0].reason, "brake_control keeps missing deadlines");
 }
 
-TEST(Arbiter, CpuPressureAloneOnlyThrottles) {
+TEST(Arbiter, CpuPressureAloneOnlyLowersWeights) {
     Arbiter arbiter;
     auto nodes = system_on_cpu0();
     nodes[1].cpu_pressure = 0.4;  // Waiting, but meeting its deadlines.
@@ -105,7 +106,7 @@ TEST(Arbiter, CpuPressureAloneOnlyThrottles) {
     for (int i = 0; i < 10; ++i) {
         for (const auto& action : arbiter.decide(nodes, i * 2.0)) steps.push_back(action.type);
     }
-    EXPECT_EQ(steps, (std::vector<ArbiterActionType>{ArbiterActionType::Throttle, ArbiterActionType::Throttle}));
+    EXPECT_EQ(steps, (std::vector<ArbiterActionType>{ArbiterActionType::LowerWeight, ArbiterActionType::LowerWeight}));
 }
 
 TEST(Arbiter, CpuPressureOfRealtimeNodeIsIgnored) {
@@ -177,23 +178,29 @@ TEST(Arbiter, RestoresOneStepAfterCalmPeriod) {
     auto nodes = system_on_cpu0();
     nodes[1].missed_deadlines = true;
     arbiter.decide(nodes, -0.5);
-    arbiter.decide(nodes, 0);  // Throttle infotainment.
-    arbiter.decide(nodes, 2);  // Throttle map_renderer.
-    arbiter.decide(nodes, 4);  // Deactivate infotainment.
+    arbiter.decide(nodes, 0);  // infotainment yields.
+    arbiter.decide(nodes, 2);  // map_renderer yields.
+    arbiter.decide(nodes, 4);  // infotainment throttled.
+    arbiter.decide(nodes, 6);  // map_renderer throttled.
+    arbiter.decide(nodes, 8);  // infotainment deactivated.
 
     nodes[1].missed_deadlines = false;
-    EXPECT_TRUE(arbiter.decide(nodes, 8).empty());  // Calm for 4 s only.
+    EXPECT_TRUE(arbiter.decide(nodes, 12).empty());  // Calm for 4 s only.
 
-    auto first = arbiter.decide(nodes, 9.5);
-    ASSERT_EQ(first.size(), 1u);
-    EXPECT_EQ(first[0].type, ArbiterActionType::Reactivate);
-    EXPECT_EQ(first[0].node, "infotainment");
-
-    EXPECT_TRUE(arbiter.decide(nodes, 12).empty());
-    auto second = arbiter.decide(nodes, 15);
-    ASSERT_EQ(second.size(), 1u);
-    EXPECT_EQ(second[0].type, ArbiterActionType::Unthrottle);
-    EXPECT_EQ(arbiter.level("infotainment") + arbiter.level("map_renderer"), 1);
+    // Most degraded first: infotainment comes back, then the throttles are lifted.
+    const std::vector<std::pair<double, ArbiterActionType>> expected = {
+        {13.5, ArbiterActionType::Reactivate},
+        {19, ArbiterActionType::Unthrottle},
+        {24.5, ArbiterActionType::Unthrottle},
+        {30, ArbiterActionType::RestoreWeight},
+        {35.5, ArbiterActionType::RestoreWeight},
+    };
+    for (const auto& [time, type] : expected) {
+        const auto actions = arbiter.decide(nodes, time);
+        ASSERT_EQ(actions.size(), 1u) << "at " << time;
+        EXPECT_EQ(actions[0].type, type) << "at " << time;
+    }
+    EXPECT_EQ(arbiter.level("infotainment") + arbiter.level("map_renderer"), 0);
 }
 
 TEST(Arbiter, StopsNodeBeforeOomButNeverSafetyNodes) {

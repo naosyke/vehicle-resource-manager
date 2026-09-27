@@ -93,10 +93,11 @@ std::string_view to_string(NodeOutcome outcome) {
 }
 
 Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, bool realtime,
-                 bool arbitration, std::uint64_t manager_id)
+                 bool arbitration, bool criticality_weights, std::uint64_t manager_id)
     : manifest_(std::move(manifest)),
       cgroups_(std::move(cgroups)),
       realtime_(realtime),
+      criticality_weights_(criticality_weights),
       arbiter_([&] {
           auto config = manifest_.arbitration;
           // Arbitration measures and acts through cgroups.
@@ -305,6 +306,19 @@ void Manager::apply(const ArbiterAction& action) {
 
     try {
         switch (action.type) {
+            case ArbiterActionType::LowerWeight:
+                cgroups_->set_cpu_weight(spec.name, arbiter_.config().lowered_cpu_weight);
+                node->arbitration_state = "yielding";
+                note(Level::Warn, spec.name,
+                     "arbitration: lowered the CPU weight of " + spec.name + " to " +
+                         std::to_string(arbiter_.config().lowered_cpu_weight) + " (" + action.reason + ")");
+                break;
+            case ArbiterActionType::RestoreWeight:
+                cgroups_->set_cpu_weight(spec.name, cpu_weight(spec));
+                node->arbitration_state.clear();
+                note(Level::Info, spec.name,
+                     "arbitration: restored the CPU weight of " + spec.name + " (" + action.reason + ")");
+                break;
             case ArbiterActionType::Throttle:
                 cgroups_->set_cpu_max(spec.name, arbiter_.config().throttle_cpu_cores);
                 node->arbitration_state = "throttled";
@@ -313,7 +327,7 @@ void Manager::apply(const ArbiterAction& action) {
                 break;
             case ArbiterActionType::Unthrottle:
                 cgroups_->set_cpu_max(spec.name, spec.resources.cpu_cores);
-                node->arbitration_state.clear();
+                node->arbitration_state = "yielding";
                 note(Level::Info, spec.name, "arbitration: restored the CPU limit of " + spec.name + " (" + action.reason + ")");
                 break;
             case ArbiterActionType::Deactivate:
@@ -400,7 +414,9 @@ bool Manager::start_node(RunningNode& node) {
     try {
         std::string cgroup_procs;
         if (cgroups_) {
-            cgroup_procs = cgroups_->create_group(spec.name, spec.resources);
+            auto budget = spec.resources;
+            budget.cpu_weight = cpu_weight(spec);
+            cgroup_procs = cgroups_->create_group(spec.name, budget);
             node.in_cgroup = true;
         }
         const std::string manager_env =
@@ -560,7 +576,7 @@ void Manager::write_status() {
         if (spec.resources.cpu_cores) json << *spec.resources.cpu_cores; else json << "null";
         json << ",\"memory_bytes\":";
         if (spec.resources.memory_bytes) json << *spec.resources.memory_bytes; else json << "null";
-        json << ",\"cpus\":" << json_int_list(spec.resources.cpus) << "}";
+        json << ",\"cpus\":" << json_int_list(spec.resources.cpus) << ",\"cpu_weight\":" << cpu_weight(spec) << "}";
         json << ",\"arbitration\":{\"level\":" << arbiter_.level(spec.name)
              << ",\"state\":" << json_string(node.arbitration_state)
              << ",\"reason\":" << json_string(node.arbitration_reason) << "}"

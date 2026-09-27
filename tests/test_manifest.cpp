@@ -153,3 +153,13 @@ TEST(Manifest, RejectsInvalidRestartSettings) {
     EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, restart: always}]"), ManifestError);
     EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, max_restarts: -1}]"), ManifestError);
 }
+
+TEST(Manifest, CpuWeightDefaultsFollowCriticality) {
+    EXPECT_EQ(vrm::default_cpu_weight(Criticality::SafetyCritical), 10000);
+    EXPECT_EQ(vrm::default_cpu_weight(Criticality::MissionCritical), 1000);
+    EXPECT_EQ(vrm::default_cpu_weight(Criticality::BestEffort), 10);
+
+    const auto manifest = parse_manifest("nodes: [{name: a, executable: x, resources: {cpu_weight: 250}}]");
+    EXPECT_EQ(*manifest.nodes[0].resources.cpu_weight, 250);
+    EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, resources: {cpu_weight: 0}}]"), ManifestError);
+}

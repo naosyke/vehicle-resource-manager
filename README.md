@@ -52,11 +52,15 @@ function such as infotainment misbehaves.
 * **Alive supervision and restarts**: a node whose heartbeat stops is treated
   as hung and killed; crashed or hung nodes are restarted with backoff
   according to their restart policy
+* **CPU shares by criticality**: `cpu.weight` 10000 / 1000 / 10 for safety /
+  mission / best-effort nodes, so critical nodes get the CPU they need while
+  less critical ones still use whatever is left
 * **Resource arbitration**: when a protected node waits for CPU (PSI) or keeps
-  missing deadlines, less critical nodes on the same CPUs are throttled,
-  deactivated and finally stopped - only as far as needed - and restored when
-  things calm down. Nodes near their memory limit are stopped gracefully
-  before the OOM killer strikes; runaway `SCHED_FIFO` nodes are demoted
+  missing deadlines, less critical nodes on the same CPUs yield (lower
+  weight), are throttled, deactivated and finally stopped - only as far as
+  needed - and restored when things calm down. Nodes near their memory limit
+  are stopped gracefully before the OOM killer strikes; runaway `SCHED_FIFO`
+  nodes are demoted
 * **Live dashboard**: CPU core map, usage against budget, response time
   against deadline, arbitration state and events in the browser
 
@@ -107,6 +111,7 @@ Press Ctrl-C to shut the system down in order.
 | `--require-cgroups` | Exit with code 3 if budgets cannot be enforced |
 | `--no-rt` | Run every node with normal scheduling (for comparisons) |
 | `--no-arbitration` | Never throttle, deactivate or stop nodes to protect others |
+| `--equal-weights` | `cpu.weight` 100 for every node instead of by criticality |
 | `--status-file PATH` | Write a JSON status snapshot for the dashboard |
 
 ```text
@@ -153,34 +158,34 @@ can appear in any setup. Hard real-time needs native Linux with a
 `PREEMPT_RT` kernel and isolated CPUs; see
 [docs/architecture.md](docs/architecture.md#7-real-time-scheduling-and-supervision).
 
-### Demo: arbitration protects a mission-critical node
+### Demo: protecting a mission-critical node without stopping anyone
 
 In [`config/demo_arbitration.yaml`](config/demo_arbitration.yaml), perception
 (mission-critical, normal scheduling) needs 20 ms of CPU every 50 ms (40 %)
-with a 30 ms deadline, on CPU 0 next to brake_control (`SCHED_FIFO`) and two
-best-effort CPU hogs. Its fair share next to the hogs is only about 27 %.
+with a 30 ms deadline, on CPU 0 next to brake_control (`SCHED_FIFO`, 20 %) and
+two best-effort CPU hogs. With equal shares it would get only about 27 %.
 
 ```bash
 docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
   build/vrm_manager config/demo_arbitration.yaml --exit-after 30
 ```
 
-```text
-WARN  arbitration: throttled map_renderer to 10% CPU (perception waits for CPU 74% of the time)
-WARN  arbitration: throttled infotainment to 10% CPU (perception keeps missing deadlines)
-WARN  arbitration: deactivated infotainment (perception keeps missing deadlines)
-WARN  arbitration: deactivated map_renderer (perception keeps missing deadlines)
-INFO  arbitration: reactivated map_renderer (no interference for 10 s)
-WARN  arbitration: deactivated map_renderer (perception keeps missing deadlines)
-```
+30 s each (perception has 600 activations):
 
-| perception over 30 s (600 activations) | Deadline misses | CPU |
-|---|---|---|
-| `--no-arbitration` | **600** (all) | 26.6 % |
-| with arbitration | **107** (mostly in the first seconds, while escalating) | 39.5 % |
+| Setup | perception misses | perception CPU | Hogs (each) | Arbitration actions |
+|---|---|---|---|---|
+| `--equal-weights --no-arbitration` | **600** (all) | 26.6 % | 26.6 % | - |
+| `--equal-weights` (arbitration only) | 66 (while reacting) | 39.9 % | shares the rest | weights lowered |
+| default: weights by criticality | **0** | **41.2 %** | **19.2 %** | **none needed** |
 
-Scheduling priority *prevents* interference within microseconds; arbitration
-*contains* it within seconds, for nodes that cannot all be real-time.
+With `cpu.weight` by criticality the CPU is fully used and nobody is stopped:
+perception gets its 40 % whenever it runs, and the hogs use what is left.
+Arbitration is the fallback when shares are not enough; it starts by lowering
+the weight (which still lets the node use idle CPU) and only then throttles,
+deactivates or stops.
+
+Scheduling priority and shares *prevent* interference; arbitration
+*contains* the cases they do not cover.
 The same run also shows two other actions: `config/demo_memory_leak.yaml` now
 stops infotainment at 91 % of its memory limit instead of waiting for the OOM
 killer, and `config/test_rt_runaway.yaml` demotes a `SCHED_FIFO` node that uses
@@ -259,10 +264,11 @@ heartbeat_timeout_ms: 1500             # No heartbeat for this long = hung
 
 arbitration:                           # All optional; these are the defaults
   enabled: true
-  cpu_pressure_threshold: 0.25         # Protected node waits for CPU > 25%: throttle others
+  cpu_pressure_threshold: 0.25         # Protected node waits for CPU > 25%: others yield
   miss_rounds: 2                       # Misses in 2 rounds (0.5 s) in a row: full ladder
   escalation_interval_s: 2             # Time between degradation steps
   recovery_s: 5                        # Calm time before restoring one step (doubles on relapse)
+  lowered_cpu_weight: 1                # cpu.weight of yielding nodes
   throttle_cpu: 0.1                    # cpu.max of throttled nodes
   memory_stop_fraction: 0.9            # Stop gracefully at 90% of memory.max
   rt_overrun_s: 1                      # SCHED_FIFO over its CPU budget this long: demote
@@ -276,7 +282,8 @@ nodes:
     restart: on-failure                # on-failure | never (default by criticality)
     max_restarts: 3
     resources:
-      cpu: 0.5                         # CPU cores (cgroup cpu.max)
+      cpu: 0.5                         # CPU cores (cgroup cpu.max): hard cap
+      cpu_weight: 10000                # Share when competing (cpu.weight); default by criticality
       memory: 64Mi                     # Hard limit (cgroup memory.max)
       cpus: [0]                        # CPU affinity (cpuset.cpus)
     depends_on: []
@@ -335,7 +342,8 @@ vehicle-resource-manager/
 ### Phase 4 - Arbitration
 
 * [x] Detect resource pressure (PSI), persistent deadline misses and budget overruns
-* [x] Degrade lower-criticality nodes (throttle, deactivate, stop) and restore them with hysteresis
+* [x] CPU shares (`cpu.weight`) by criticality
+* [x] Degrade lower-criticality nodes (lower weight, throttle, deactivate, stop) and restore them with hysteresis
 * [x] Stop nodes before the OOM killer; demote runaway SCHED_FIFO nodes
 * [x] Demos: CPU contention with and without arbitration, memory leak, real-time runaway
 

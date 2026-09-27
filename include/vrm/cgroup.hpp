@@ -82,6 +82,9 @@ public:
     // Changes a node's CPU limit at runtime (nullopt = unlimited).
     void set_cpu_max(const std::string& node, std::optional<double> cores);
 
+    // Changes a node's share of CPU when nodes compete (1-10000).
+    void set_cpu_weight(const std::string& node, int weight);
+
     // Removes the (empty) group of a node that has exited.
     void remove_group(const std::string& node);
 

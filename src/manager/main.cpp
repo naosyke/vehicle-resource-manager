@@ -10,6 +10,7 @@
 //   --require-cgroups         exit with code 3 if budgets cannot be enforced
 //   --no-rt                   ignore priorities (all nodes SCHED_OTHER), for comparisons
 //   --no-arbitration          never throttle, deactivate or stop nodes to protect others
+//   --equal-weights           cpu.weight 100 for every node instead of by criticality
 //   --status-file PATH        write a JSON status snapshot for the dashboard
 //   --status-interval SECONDS status snapshot interval (default 1)
 #include <chrono>
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
     bool require_cgroups = false;
     bool realtime = true;
     bool arbitration = true;
+    bool criticality_weights = true;
     std::string status_file;
     double status_interval_seconds = 1.0;
     for (int i = 1; i < argc; ++i) {
@@ -45,6 +47,8 @@ int main(int argc, char** argv) {
             realtime = false;
         } else if (arg == "--no-arbitration") {
             arbitration = false;
+        } else if (arg == "--equal-weights") {
+            criticality_weights = false;
         } else if (arg == "--status-file" && i + 1 < argc) {
             status_file = argv[++i];
         } else if (arg == "--status-interval" && i + 1 < argc) {
@@ -52,12 +56,12 @@ int main(int argc, char** argv) {
         } else if (manifest_path.empty() && arg.rfind("--", 0) != 0) {
             manifest_path = arg;
         } else {
-            std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--no-arbitration] [--status-file PATH] [--status-interval S]\n";
+            std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--no-arbitration] [--equal-weights] [--status-file PATH] [--status-interval S]\n";
             return 2;
         }
     }
     if (manifest_path.empty()) {
-        std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--no-arbitration] [--status-file PATH] [--status-interval S]\n";
+        std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--no-arbitration] [--equal-weights] [--status-file PATH] [--status-interval S]\n";
         return 2;
     }
 
@@ -85,7 +89,7 @@ int main(int argc, char** argv) {
     }
 
     vrm::install_stop_signal_handlers();
-    vrm::Manager manager(std::move(manifest), std::move(cgroups), realtime, arbitration);
+    vrm::Manager manager(std::move(manifest), std::move(cgroups), realtime, arbitration, criticality_weights);
     if (!status_file.empty()) {
         manager.set_status_file(status_file,
                                 std::chrono::milliseconds(static_cast<long>(status_interval_seconds * 1000)));

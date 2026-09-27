@@ -65,6 +65,8 @@ function such as infotainment misbehaves.
   against deadline, arbitration state and events in the browser
 * **CPU timeline**: which node runs on which CPU, from the kernel's
   `sched_switch` trace events, down to a 100 ms window
+* **Telemetry over DDS**: node status and events are published on DDS topics,
+  and `vrm_monitor` shows them like `top` from any container or machine
 
 ## Requirements
 
@@ -194,6 +196,37 @@ in one go and finishes in 28 ms. The best-effort nodes meet their looser
 deadlines in the gaps either way. (Results vary between runs in the Docker
 Desktop VM: in a run with many VM stalls brake_control, which cannot be
 delayed by the other nodes, missed 24 deadlines and the others a few.)
+
+### Monitoring over DDS
+
+The manager publishes every node's status each second (`vrm_node_status`)
+and every event (`vrm_system_event`) over DDS. `vrm_monitor` subscribes to
+them - from another container, or another machine on the network - and shows
+the system like `top`. It needs no privileges:
+
+```bash
+# Terminal 1: the system
+docker run --rm -it --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/demo_schedulable.yaml --report-interval 0
+
+# Terminal 2: the monitor, in its own unprivileged container
+docker run --rm -it -v "$PWD":/workspace vrm-base build/vrm_monitor
+```
+
+```text
+SYSTEM demo_schedulable  (manager 2cdaa2feff69e349)
+NODE            CRIT     STATE         CPU/LIMIT %  WAIT      MEMORY/LIMIT SCHED           RESP/DEADLINE   MISS ARBITRATION
+brake_control   safety   active             20.3/-    0%      1.8Mi/64.0Mi FIFO 80               2.4/4.0      0
+infotainment    best-eff active             15.4/-   57%     1.8Mi/128.0Mi OTHER              75.5/100.0      0
+map_renderer    best-eff active             13.4/-   60%     2.2Mi/128.0Mi OTHER             126.8/200.0      0
+perception      mission  active             39.5/-   22%     1.8Mi/128.0Mi OTHER               26.1/30.0      1
+
+RECENT EVENTS
+07:39:57 warn  perception missed 1 deadlines (deadline 30.00 ms, worst response 32.78 ms)
+```
+
+Both topics are transient local, so a monitor that starts later still gets
+every node's current status and the last 100 events.
 
 ### Demo: watching the scheduler on two CPUs
 
@@ -361,10 +394,12 @@ nodes:
 vehicle-resource-manager/
 ├── idl/LifecycleMsgs.idl        # DDS types: LifecycleCommand, LifecycleStatus
 ├── include/vrm/                 # Public headers
+├── idl/TelemetryMsgs.idl        # DDS types: NodeStatusReport, SystemEvent
 ├── src/
 │   ├── core/                    # Lifecycle state machine, manifest, cgroups, logging (no DDS)
 │   ├── dds/                     # DDS QoS / conversions, ManagedNode base class
 │   ├── manager/                 # vrm_manager: startup, supervision, shutdown
+│   ├── tools/monitor.cpp        # vrm_monitor: live view over DDS
 │   └── nodes/demo_node.cpp      # Configurable demo node
 ├── config/                      # System manifests (demo and tests)
 ├── dashboard/index.html         # Live resource dashboard (reads status/status.json)
@@ -407,4 +442,4 @@ vehicle-resource-manager/
 
 * [x] Live view of nodes, budgets, usage and events (JSON status + dashboard)
 * [x] Deadline statistics in the dashboard
-* [ ] Resource and lifecycle telemetry over DDS
+* [x] Resource and lifecycle telemetry over DDS, with `vrm_monitor`

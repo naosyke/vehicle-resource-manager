@@ -26,12 +26,13 @@ target_link_libraries(vrm_core PUBLIC yaml-cpp)
 target_compile_options(vrm_core PRIVATE -Wall -Wextra -Wpedantic)
 
 # DDS types generated from IDL.
-idlcxx_generate(TARGET vrm_idl FILES idl/LifecycleMsgs.idl WARNINGS no-implicit-extensibility)
+idlcxx_generate(TARGET vrm_idl FILES idl/LifecycleMsgs.idl idl/TelemetryMsgs.idl WARNINGS no-implicit-extensibility)
 
 # DDS lifecycle protocol and the ManagedNode base class.
 add_library(vrm_dds
   src/dds/dds_lifecycle.cpp
   src/dds/managed_node.cpp
+  src/dds/dds_telemetry.cpp
 )
 target_link_libraries(vrm_dds PUBLIC vrm_core vrm_idl CycloneDDS-CXX::ddscxx)
 target_compile_options(vrm_dds PRIVATE -Wall -Wextra)
@@ -42,9 +43,14 @@ add_executable(vrm_manager
   src/manager/lifecycle_client.cpp
   src/manager/process.cpp
   src/manager/cpu_tracer.cpp
+  src/manager/telemetry.cpp
 )
 target_link_libraries(vrm_manager PRIVATE vrm_dds)
 target_compile_options(vrm_manager PRIVATE -Wall -Wextra)
+
+add_executable(vrm_monitor src/tools/monitor.cpp)
+target_link_libraries(vrm_monitor PRIVATE vrm_dds)
+target_compile_options(vrm_monitor PRIVATE -Wall -Wextra)
 
 add_executable(vrm_demo_node src/nodes/demo_node.cpp)
 target_link_libraries(vrm_demo_node PRIVATE vrm_dds)
@@ -142,6 +148,17 @@ add_test(NAME arbitration_demotes_runaway_realtime_node
 
 set_tests_properties(arbitration_lowers_weights_of_hogs cpu_weights_follow_criticality arbitration_stops_before_oom
   arbitration_demotes_runaway_realtime_node PROPERTIES SKIP_RETURN_CODE 77)
+
+# Telemetry over DDS: a separate process (vrm_monitor) that starts 2 s late
+# still sees the manager's nodes and the events from startup (transient local).
+add_test(NAME monitor_receives_telemetry_over_dds
+  COMMAND sh -c "($<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_system.yaml --exit-after 5 \
+    --no-cgroups --report-interval 0 > /dev/null 2>&1 &) \
+    && sleep 2 && $<TARGET_FILE:vrm_monitor> --once 1.5 > monitor.txt \
+    && grep -q 'SYSTEM test_system' monitor.txt \
+    && grep -q '^brake_control .* active' monitor.txt \
+    && grep -q '^media_sync .* skipped' monitor.txt \
+    && grep -q 'startup complete' monitor.txt; status=$?; sleep 2; exit $status")
 
 # The status file for the dashboard is valid JSON with the final node states.
 add_test(NAME status_file_for_dashboard

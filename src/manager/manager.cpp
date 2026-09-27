@@ -105,7 +105,8 @@ Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups
           config.enabled = config.enabled && arbitration && cgroups_ != nullptr;
           return config;
       }()),
-      client_(manager_id ? manager_id : random_manager_id()) {
+      client_(manager_id ? manager_id : random_manager_id()),
+      telemetry_(client_.manager_id()) {
     for (const auto* spec : startup_order(manifest_)) {
         RunningNode node{};
         node.spec = spec;
@@ -114,9 +115,15 @@ Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups
     client_.set_state_listener([this](const std::string& node, const NodeStatus& status) {
         std::string message = node + " -> " + std::string(to_string(status.state));
         if (!status.message.empty()) message += " (" + status.message + ")";
-        events_.push_back({now_seconds(), status.success ? Level::Info : Level::Warn, node, message});
-        while (events_.size() > kMaxEvents) events_.pop_front();
+        record_event(status.success ? Level::Info : Level::Warn, node, message);
     });
+}
+
+void Manager::record_event(Level level, const std::string& node, const std::string& message) {
+    const double time = now_seconds();
+    events_.push_back({time, level, node, message});
+    while (events_.size() > kMaxEvents) events_.pop_front();
+    telemetry_.publish_event(time, level_name(static_cast<int>(level)), node, message);
 }
 
 void Manager::note(Level level, const std::string& node, const std::string& message) {
@@ -125,8 +132,7 @@ void Manager::note(Level level, const std::string& node, const std::string& mess
         case Level::Warn: log::warn("manager", message); break;
         case Level::Error: log::error("manager", message); break;
     }
-    events_.push_back({now_seconds(), level, node, message});
-    while (events_.size() > kMaxEvents) events_.pop_front();
+    record_event(level, node, message);
 }
 
 Manager::~Manager() { stop(); }
@@ -474,6 +480,7 @@ bool Manager::start() {
     note(Level::Info, "", std::string("startup complete; arbitration ") +
                               (arbiter_.config().enabled ? "enabled" : "disabled"));
     write_status();
+    publish_telemetry();
     print_summary();
     return true;
 }
@@ -486,6 +493,7 @@ void Manager::supervise(std::chrono::milliseconds duration, std::chrono::millise
     }
 
     auto next_status = start;
+    auto next_telemetry = start;
     while (!g_stop_requested) {
         const auto now = std::chrono::steady_clock::now();
         if (duration.count() > 0 && now - start >= duration) {
@@ -494,6 +502,10 @@ void Manager::supervise(std::chrono::milliseconds duration, std::chrono::millise
         if (!status_path_.empty() && now >= next_status) {
             write_status();
             next_status += status_interval_;
+        }
+        if (now >= next_telemetry) {
+            publish_telemetry();
+            next_telemetry += std::chrono::seconds(1);
         }
         if (report_interval.count() > 0 && now >= next_report) {
             print_resources();
@@ -544,6 +556,56 @@ void Manager::set_status_file(std::string path, std::chrono::milliseconds interv
     if (!directory.empty()) std::filesystem::create_directories(directory, error);
     if (error) {
         log::warn("manager", "cannot create " + directory.string() + ": " + error.message());
+    }
+}
+
+msg::NodeStatusReport Manager::build_report(RunningNode& node) {
+    const auto& spec = *node.spec;
+    msg::NodeStatusReport report;
+    report.manager_id(client_.manager_id());
+    report.node(spec.name);
+    report.system(manifest_.name);
+    report.criticality(std::string(to_string(spec.criticality)));
+    report.priority(spec.priority);
+    report.pid(node.pid);
+    report.running(node.running);
+    const auto status = client_.status(spec.name);
+    report.state(status && node.pid != 0 && status->pid == node.pid ? std::string(to_string(status->state))
+                                                                    : "not_started");
+    report.outcome(std::string(to_string(node.outcome)));
+    report.detail(node.detail);
+    report.restarts(node.restarts);
+
+    report.cpu_percent(node.running ? node.cpu_percent : 0.0);
+    report.cpu_limit_percent(spec.resources.cpu_cores ? *spec.resources.cpu_cores * 100.0 : -1.0);
+    report.cpu_pressure(node.running ? node.cpu_pressure : 0.0);
+    report.cpu_weight(cpu_weight(spec));
+    report.memory_bytes(node.usage.memory_current);
+    report.memory_peak_bytes(node.usage.memory_peak);
+    report.memory_limit_bytes(spec.resources.memory_bytes ? *spec.resources.memory_bytes : 0);
+    report.cpu_throttled(node.usage.nr_throttled);
+    report.oom_kills(node.usage.oom_kills);
+
+    const auto heartbeat = client_.heartbeat(spec.name);
+    if (heartbeat && heartbeat->pid == node.pid) {
+        report.sched_policy(heartbeat->sched_policy);
+        report.sched_priority(heartbeat->sched_priority);
+        report.period_us(heartbeat->period_us);
+        report.deadline_us(heartbeat->deadline_us);
+        report.max_response_us(heartbeat->window_max_response_us);
+        report.max_latency_us(heartbeat->window_max_latency_us);
+        report.total_misses(heartbeat->total_misses);
+    }
+    report.arbitration_state(node.arbitration_state);
+    report.arbitration_level(arbiter_.level(spec.name));
+    report.arbitration_reason(node.arbitration_reason);
+    return report;
+}
+
+void Manager::publish_telemetry() {
+    for (auto& node : nodes_) {
+        if (node.in_cgroup && node.running) sample_if_stale(node);
+        telemetry_.publish_status(build_report(node));
     }
 }
 
@@ -759,6 +821,7 @@ void Manager::stop() {
     }
     note(Level::Info, "", "all nodes stopped");
     write_status();
+    publish_telemetry();
 }
 
 void Manager::print_summary() const {

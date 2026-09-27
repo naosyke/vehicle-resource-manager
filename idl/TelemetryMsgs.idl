@@ -1,0 +1,64 @@
+// Telemetry published by the resource manager, so other tools (a monitor, a
+// logger, a diagnostic service on another ECU) can follow the system over DDS.
+module vrm {
+module msg {
+
+// One sample per node every second. Topic "vrm_node_status".
+// QoS: reliable, transient local, keep last 1 per node: a subscriber that
+// joins late immediately gets every node's current status.
+@topic
+struct NodeStatusReport {
+    @key unsigned long long manager_id;
+    @key string node;
+    string system;
+
+    string criticality;         // safety_critical | mission_critical | best_effort
+    long priority;              // Manifest real-time priority, 0 = normal.
+    long pid;
+    boolean running;
+    string state;               // Lifecycle state, e.g. "active".
+    string outcome;             // active | failed | skipped | exited | stopped | not started
+    string detail;
+    long restarts;
+
+    // Resources (cgroup v2). Limits are -1 / 0 when not set.
+    double cpu_percent;         // 100 = one core.
+    double cpu_limit_percent;
+    double cpu_pressure;        // Share of time waiting for CPU.
+    long cpu_weight;
+    unsigned long long memory_bytes;
+    unsigned long long memory_peak_bytes;
+    unsigned long long memory_limit_bytes;
+    unsigned long long cpu_throttled;
+    unsigned long long oom_kills;
+
+    // Scheduling and timing (from the node's heartbeat).
+    string sched_policy;
+    long sched_priority;
+    unsigned long period_us;
+    unsigned long deadline_us;
+    unsigned long max_response_us;
+    unsigned long max_latency_us;
+    unsigned long long total_misses;
+
+    // Arbitration
+    string arbitration_state;   // yielding | throttled | deactivated | stopped | demoted | ""
+    long arbitration_level;
+    string arbitration_reason;
+};
+
+// Everything the manager logs as an event. Topic "vrm_system_event".
+// QoS: reliable, transient local, keep last 100 per manager: a subscriber
+// that joins late gets the recent history.
+@topic
+struct SystemEvent {
+    @key unsigned long long manager_id;
+    unsigned long long event_id;  // Increases by one per event of this manager.
+    double time;                  // Unix time in seconds.
+    string level;                 // info | warn | error
+    string node;                  // Empty for system-wide events.
+    string message;
+};
+
+};
+};

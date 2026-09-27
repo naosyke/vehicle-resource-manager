@@ -116,6 +116,21 @@ TEST(Arbiter, CpuPressureOfRealtimeNodeIsIgnored) {
     EXPECT_TRUE(arbiter.decide(nodes, 0).empty());
 }
 
+TEST(Arbiter, MissesOfRealtimeNodeNeverDegradeNormalNodes) {
+    Arbiter arbiter;
+    auto nodes = system_on_cpu0();
+    nodes[0].realtime = true;  // brake runs SCHED_FIFO...
+    nodes[0].missed_deadlines = true;  // ...and still misses (e.g. VM stalls).
+
+    for (int i = 0; i < 10; ++i) EXPECT_TRUE(arbiter.decide(nodes, i * 2.0).empty());
+
+    nodes[3].realtime = true;  // A real-time infotainment on the same CPU could be the cause.
+    arbiter.decide(nodes, 30);
+    const auto actions = arbiter.decide(nodes, 32);
+    ASSERT_EQ(actions.size(), 1u);
+    EXPECT_EQ(actions[0].node, "infotainment");
+}
+
 TEST(Arbiter, PressureBelowThresholdIsIgnored) {
     Arbiter arbiter;
     auto nodes = system_on_cpu0();

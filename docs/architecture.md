@@ -322,8 +322,11 @@ stateDiagram-v2
 | A protected node misses deadlines in `miss_rounds` (2) consecutive rounds | Heartbeats | The whole ladder - this is actual harm; a single spike (e.g. a VM stall) is ignored |
 
 Protected nodes are safety- and mission-critical ones. A victim must be
-strictly less critical than the suffering node and able to run on the same
-CPU (overlapping `cpuset`, or unpinned). Among candidates: least critical
+strictly less critical than the suffering node, able to run on the same CPU
+(overlapping `cpuset`, or unpinned), and able to delay it at all: a
+`SCHED_FIFO` node preempts every normal task, so only other real-time nodes
+are considered for it. Its misses without real-time competition (e.g. VM
+stalls) therefore degrade nothing. Among candidates: least critical
 first, then the least degraded (throttle everyone before deactivating
 anyone), then the lowest priority, then the biggest CPU user. One step is
 taken per `escalation_interval_s`, so the effect of each step can be seen

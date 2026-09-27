@@ -123,6 +123,10 @@ std::vector<ArbiterAction> Arbiter::decide(const std::vector<ArbiterNode>& nodes
                 for (const auto* sufferer : sufferers) {
                     if (candidate.criticality <= sufferer->criticality) continue;
                     if (!may_share_cpu(candidate, *sufferer)) continue;
+                    // A SCHED_FIFO node preempts every normal task, so normal
+                    // tasks cannot be the cause of its misses (e.g. a VM stall
+                    // is); only other real-time nodes can interfere with it.
+                    if (sufferer->realtime && !candidate.realtime) continue;
                     if (!victim || rank(&candidate) < rank(victim)) {
                         victim = &candidate;
                         protected_node = sufferer;

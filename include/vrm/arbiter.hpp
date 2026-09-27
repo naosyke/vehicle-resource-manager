@@ -11,6 +11,8 @@
 //   throttling only: part of that wait is caused by more critical nodes.
 // - A protected node missing deadlines in several consecutive rounds (actual
 //   harm) allows the whole ladder. A single spike is ignored.
+// - A real-time (SCHED_FIFO) node can only be disturbed by other real-time
+//   nodes, so its misses never degrade normal nodes.
 //
 // After a calm period the most critical degraded node is restored one step
 // (throttled / deactivated nodes only; stopped nodes stay stopped). If the

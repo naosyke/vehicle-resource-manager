@@ -108,6 +108,14 @@ TEST(Arbiter, CpuPressureAloneOnlyThrottles) {
     EXPECT_EQ(steps, (std::vector<ArbiterActionType>{ArbiterActionType::Throttle, ArbiterActionType::Throttle}));
 }
 
+TEST(Arbiter, CpuPressureOfRealtimeNodeIsIgnored) {
+    Arbiter arbiter;
+    auto nodes = system_on_cpu0();
+    nodes[0].realtime = true;
+    nodes[0].cpu_pressure = 0.4;  // brake's own threads waiting for each other.
+    EXPECT_TRUE(arbiter.decide(nodes, 0).empty());
+}
+
 TEST(Arbiter, PressureBelowThresholdIsIgnored) {
     Arbiter arbiter;
     auto nodes = system_on_cpu0();

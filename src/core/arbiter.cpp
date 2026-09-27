@@ -95,7 +95,10 @@ std::vector<ArbiterAction> Arbiter::decide(const std::vector<ArbiterNode>& nodes
         if (!node.active || !is_protected(node)) continue;
         if (miss_streak_[node.name] >= config_.miss_rounds) {
             missing.push_back(&node);
-        } else if (node.cpu_pressure >= config_.cpu_pressure_threshold) {
+        } else if (!node.realtime && node.cpu_pressure >= config_.cpu_pressure_threshold) {
+            // For a SCHED_FIFO node, waiting for CPU can only mean waiting for
+            // its own threads or other real-time tasks, which throttling
+            // normal tasks cannot help; only its deadline misses count.
             waiting.push_back(&node);
         }
     }

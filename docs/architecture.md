@@ -318,7 +318,7 @@ stateDiagram-v2
 
 | Signal | Source | Allows |
 |---|---|---|
-| A protected node waits for CPU more than `cpu_pressure_threshold` (25 %) | PSI `cpu.pressure` of its cgroup, difference of `total` between samples | Throttling only - part of the wait is caused by more critical nodes, which is legitimate |
+| A protected node waits for CPU more than `cpu_pressure_threshold` (25 %) | PSI `cpu.pressure` of its cgroup, difference of `total` between samples | Throttling only - part of the wait is caused by more critical nodes, which is legitimate. Ignored for `SCHED_FIFO` nodes: their only waits are for their own threads or other real-time tasks, which throttling normal tasks cannot help |
 | A protected node misses deadlines in `miss_rounds` (2) consecutive rounds | Heartbeats | The whole ladder - this is actual harm; a single spike (e.g. a VM stall) is ignored |
 
 Protected nodes are safety- and mission-critical ones. A victim must be

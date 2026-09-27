@@ -158,6 +158,39 @@ can appear in any setup. Hard real-time needs native Linux with a
 `PREEMPT_RT` kernel and isolated CPUs; see
 [docs/architecture.md](docs/architecture.md#7-real-time-scheduling-and-supervision).
 
+### Demo: a schedulable system - every node meets its deadline
+
+[`config/demo_schedulable.yaml`](config/demo_schedulable.yaml) is a realistic
+mix on CPU 0 that needs 90 % of it in total:
+
+| Node | Period | Work | Deadline | CPU | Scheduling |
+|---|---|---|---|---|---|
+| brake_control | 10 ms | 2 ms | 4 ms | 20 % | SCHED_FIFO 80 |
+| perception | 50 ms | 20 ms | 30 ms | 40 % | normal, cpu.weight 1000 |
+| infotainment | 100 ms | 15 ms | 100 ms | 15 % | normal, cpu.weight 10 |
+| map_renderer | 200 ms | 30 ms | 200 ms | 15 % | normal, cpu.weight 10 |
+
+```bash
+docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/demo_schedulable.yaml --exit-after 30
+```
+
+Deadline misses over 30 s:
+
+| Setup | brake_control (3000) | perception (600) | infotainment (300) | map_renderer (150) |
+|---|---|---|---|---|
+| default: SCHED_FIFO + weights by criticality | **1** | **2** | **0** | **0** |
+| `--equal-weights --no-arbitration` | 0 | **453** | 0 | 0 |
+| `--no-rt --equal-weights --no-arbitration` | **595** | **451** | 0 | 0 |
+
+The CPU is sufficient on average, but the tight deadlines only hold when the
+critical nodes run first: with equal shares perception's 20 ms of work is
+interleaved with the others and takes 52 ms; with its higher weight it runs
+in one go and finishes in 28 ms. The best-effort nodes meet their looser
+deadlines in the gaps either way. (Results vary between runs in the Docker
+Desktop VM: in a run with many VM stalls brake_control, which cannot be
+delayed by the other nodes, missed 24 deadlines and the others a few.)
+
 ### Demo: protecting a mission-critical node without stopping anyone
 
 In [`config/demo_arbitration.yaml`](config/demo_arbitration.yaml), perception

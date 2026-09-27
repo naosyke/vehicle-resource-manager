@@ -1,0 +1,46 @@
+# Demo: a schedulable system - every node meets its deadline.
+#
+# All four nodes share CPU 0 and need 90% of it in total:
+#
+#   node            period  work   deadline  CPU
+#   brake_control    10 ms   2 ms     4 ms   20%   safety, SCHED_FIFO 80
+#   perception       50 ms  20 ms    30 ms   40%   mission, normal scheduling
+#   infotainment    100 ms  15 ms   100 ms   15%   best effort
+#   map_renderer    200 ms  30 ms   200 ms   15%   best effort
+#
+# The CPU is enough on average, but the tight deadlines only hold if the
+# critical nodes run first when they are ready: brake_control through
+# SCHED_FIFO, perception through its cpu.weight (1000 vs 10). The best-effort
+# nodes run in the gaps and still meet their looser deadlines.
+#
+#   ... build/vrm_manager config/demo_schedulable.yaml --exit-after 30
+#   ... build/vrm_manager config/demo_schedulable.yaml --equal-weights --no-arbitration --exit-after 30
+#   ... build/vrm_manager config/demo_schedulable.yaml --no-rt --equal-weights --no-arbitration --exit-after 30
+system: demo_schedulable
+transition_timeout_ms: 3000
+
+nodes:
+  - name: brake_control
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "2", "--deadline-ms", "4"]
+    criticality: safety_critical
+    priority: 80
+    resources: {memory: 64Mi, cpus: [0]}
+
+  - name: perception
+    executable: vrm_demo_node
+    args: ["--period-ms", "50", "--work-ms", "20", "--deadline-ms", "30"]
+    criticality: mission_critical
+    resources: {memory: 128Mi, cpus: [0]}
+
+  - name: infotainment
+    executable: vrm_demo_node
+    args: ["--period-ms", "100", "--work-ms", "15", "--deadline-ms", "100"]
+    criticality: best_effort
+    resources: {memory: 128Mi, cpus: [0]}
+
+  - name: map_renderer
+    executable: vrm_demo_node
+    args: ["--period-ms", "200", "--work-ms", "30", "--deadline-ms", "200"]
+    criticality: best_effort
+    resources: {memory: 128Mi, cpus: [0]}

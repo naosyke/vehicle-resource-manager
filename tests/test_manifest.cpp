@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -162,4 +163,17 @@ TEST(Manifest, CpuWeightDefaultsFollowCriticality) {
     const auto manifest = parse_manifest("nodes: [{name: a, executable: x, resources: {cpu_weight: 250}}]");
     EXPECT_EQ(*manifest.nodes[0].resources.cpu_weight, 250);
     EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, resources: {cpu_weight: 0}}]"), ManifestError);
+}
+
+TEST(Manifest, AllConfigFilesAreValid) {
+    int checked = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(VRM_CONFIG_DIR)) {
+        if (entry.path().extension() != ".yaml") continue;
+        SCOPED_TRACE(entry.path().string());
+        const auto manifest = vrm::load_manifest(entry.path().string());
+        EXPECT_FALSE(manifest.nodes.empty());
+        EXPECT_NO_THROW(vrm::startup_order(manifest));
+        ++checked;
+    }
+    EXPECT_GE(checked, 8);
 }

@@ -61,6 +61,7 @@ add_executable(vrm_unit_tests
   tests/test_arbiter.cpp
 )
 target_link_libraries(vrm_unit_tests PRIVATE vrm_core GTest::gtest_main)
+target_compile_definitions(vrm_unit_tests PRIVATE VRM_CONFIG_DIR="${CMAKE_SOURCE_DIR}/config")
 include(GoogleTest)
 gtest_discover_tests(vrm_unit_tests)
 

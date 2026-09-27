@@ -30,8 +30,13 @@ struct RequestResult {
 
 class LifecycleClient {
 public:
+    // Called when a node reports a new state (or a failed request).
+    using StateListener = std::function<void(const std::string& node, const NodeStatus& status)>;
+
     LifecycleClient();
     ~LifecycleClient();
+
+    void set_state_listener(StateListener listener) { listener_ = std::move(listener); }
 
     // Takes new status samples and logs state changes.
     void poll();
@@ -53,6 +58,7 @@ private:
     struct Dds;
     std::unique_ptr<Dds> dds_;
     std::map<std::string, NodeStatus> latest_;
+    StateListener listener_;
     std::uint32_t next_request_id_ = 1;
 };
 

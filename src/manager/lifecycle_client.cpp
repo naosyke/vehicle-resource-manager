@@ -48,6 +48,9 @@ void LifecycleClient::poll() {
             } else {
                 log::warn("manager", data.node() + ": " + line);
             }
+            current = next;
+            if (listener_) listener_(data.node(), next);
+            continue;
         }
         current = next;
     }

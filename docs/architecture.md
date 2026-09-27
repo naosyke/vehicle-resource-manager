@@ -186,7 +186,20 @@ When cgroups are not writable (for example an unprivileged container), the
 manager logs a warning and runs without enforcement; `--require-cgroups`
 turns that into an error.
 
-## 6. Planned
+## 6. Dashboard
+
+With `--status-file PATH`, the manager writes a JSON snapshot every
+`--status-interval` seconds (default 1): per node the lifecycle state,
+outcome, budget and measured usage, plus the last 100 events. It writes to a
+temporary file and renames it, so a reader never sees a partial file.
+`dashboard/index.html` polls the file and keeps a 60 second history in the
+browser.
+
+```text
+vrm_manager ──(write + rename every 1 s)──▶ status/status.json ◀──(fetch every 1 s)── dashboard/index.html
+```
+
+## 7. Planned
 
 Phase 3 adds SCHED_FIFO priorities and heartbeat / deadline monitoring;
 phase 4 adds pressure-based arbitration (PSI), so that lower-criticality nodes

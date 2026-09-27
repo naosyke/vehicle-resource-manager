@@ -44,6 +44,8 @@ function such as infotainment misbehaves.
   before `exec`, so limits apply from its first instruction
 * **Resource monitoring**: per-node CPU usage, memory, peak memory, CPU
   throttling and OOM kills, read from the cgroup files
+* **Live dashboard**: CPU core map, usage against budget per node, and events
+  in the browser
 
 ## Requirements
 
@@ -134,6 +136,33 @@ its 10 ms period (605 ticks in 6 seconds) because its memory and CPU are
 accounted separately. In phase 4 the manager will act on the rising memory
 before the OOM killer has to.
 
+## Dashboard
+
+The manager can write a JSON snapshot of all nodes (state, budgets, usage,
+recent events) every second, and `dashboard/index.html` shows it live.
+
+```bash
+# Terminal 1: run the system and write status/status.json
+mkdir -p status
+docker run --rm -it --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/system.yaml --report-interval 0 --status-file status/status.json
+
+# Terminal 2: serve the repository and open http://localhost:8080/dashboard/
+python3 -m http.server 8080
+```
+
+* **CPU cores**: which node is pinned to which core, and which nodes may run
+  on any core. A pinned core that unpinned nodes can also use is marked as
+  shared.
+* **Nodes**: CPU and memory as bars against each node's budget (the gray tick
+  is peak memory), with the last 60 seconds as charts where the dashed line
+  is the limit. A node near its memory limit, throttled nodes and OOM kills
+  are flagged.
+* **Events**: lifecycle changes, failures and OOM kills.
+
+Run `config/demo_memory_leak.yaml` the same way to watch infotainment approach
+its limit, get OOM-killed, and brake_control carry on.
+
 ### Failure scenarios
 
 ```bash
@@ -179,6 +208,7 @@ vehicle-resource-manager/
 │   ├── manager/                 # vrm_manager: startup, supervision, shutdown
 │   └── nodes/demo_node.cpp      # Configurable demo node
 ├── config/                      # System manifests (demo and tests)
+├── dashboard/index.html         # Live resource dashboard (reads status/status.json)
 ├── tests/                       # GoogleTest unit tests
 ├── docs/architecture.md
 ├── CMakeLists.txt
@@ -214,5 +244,6 @@ vehicle-resource-manager/
 
 ### Phase 5 - Observability
 
+* [x] Live view of nodes, budgets, usage and events (JSON status + dashboard)
 * [ ] Resource and lifecycle telemetry over DDS
-* [ ] Live view of nodes, budgets and deadline statistics
+* [ ] Deadline statistics in the dashboard

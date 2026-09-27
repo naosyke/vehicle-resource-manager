@@ -72,3 +72,10 @@ add_test(NAME system_startup_and_shutdown
 add_test(NAME safety_critical_failure_aborts_startup
   COMMAND vrm_manager ${CMAKE_SOURCE_DIR}/config/test_safety_failure.yaml --exit-after 1)
 set_tests_properties(safety_critical_failure_aborts_startup PROPERTIES WILL_FAIL TRUE)
+
+# The status file for the dashboard is valid JSON with the final node states.
+add_test(NAME status_file_for_dashboard
+  COMMAND sh -c "$<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_system.yaml --exit-after 1 \
+    --status-file status_test.json > /dev/null \
+    && grep -q '\"system\":\"test_system\"' status_test.json \
+    && grep -q '\"name\":\"media_sync\",.*\"outcome\":\"skipped\"' status_test.json")

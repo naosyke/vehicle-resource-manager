@@ -142,12 +142,11 @@ The manager can write a JSON snapshot of all nodes (state, budgets, usage,
 recent events) every second, and `dashboard/index.html` shows it live.
 
 ```bash
-# Terminal 1: run the system and write status/status.json
-mkdir -p status
+# Terminal 1 (in the repository root): run the system and write status/status.json
 docker run --rm -it --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
   build/vrm_manager config/system.yaml --report-interval 0 --status-file status/status.json
 
-# Terminal 2: serve the repository and open http://localhost:8080/dashboard/
+# Terminal 2 (in the repository root): serve it and open http://localhost:8080/dashboard/
 python3 -m http.server 8080
 ```
 

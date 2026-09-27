@@ -92,6 +92,7 @@ private:
     std::deque<Event> events_;
     std::string status_path_;
     std::chrono::milliseconds status_interval_{1000};
+    bool status_write_failed_ = false;
 };
 
 }  // namespace vrm

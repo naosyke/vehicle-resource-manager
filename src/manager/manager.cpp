@@ -2,7 +2,10 @@
 
 #include <signal.h>
 
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <sstream>
 #include <thread>
 
@@ -260,6 +263,12 @@ void Manager::sample_if_stale(RunningNode& node) {
 void Manager::set_status_file(std::string path, std::chrono::milliseconds interval) {
     status_path_ = std::move(path);
     status_interval_ = interval;
+    const auto directory = std::filesystem::path(status_path_).parent_path();
+    std::error_code error;
+    if (!directory.empty()) std::filesystem::create_directories(directory, error);
+    if (error) {
+        log::warn("manager", "cannot create " + directory.string() + ": " + error.message());
+    }
 }
 
 void Manager::write_status() {
@@ -315,12 +324,23 @@ void Manager::write_status() {
 
     // Write then rename, so readers never see a half-written file.
     const std::string temporary = status_path_ + ".tmp";
-    if (FILE* file = std::fopen(temporary.c_str(), "w")) {
+    FILE* file = std::fopen(temporary.c_str(), "w");
+    bool ok = file != nullptr;
+    int error = ok ? 0 : errno;
+    if (file) {
         const auto text = json.str();
-        std::fwrite(text.data(), 1, text.size(), file);
-        std::fclose(file);
-        std::rename(temporary.c_str(), status_path_.c_str());
+        ok = std::fwrite(text.data(), 1, text.size(), file) == text.size();
+        ok = (std::fclose(file) == 0) && ok;
+        if (ok && std::rename(temporary.c_str(), status_path_.c_str()) != 0) ok = false;
+        if (!ok) error = errno;
     }
+    // Warn once per failure streak, not every second.
+    if (!ok && !status_write_failed_) {
+        log::warn("manager", "cannot write status file " + status_path_ + ": " + std::strerror(error));
+    } else if (ok && status_write_failed_) {
+        log::info("manager", "status file " + status_path_ + " is being written again");
+    }
+    status_write_failed_ = !ok;
 }
 
 void Manager::print_resources() {

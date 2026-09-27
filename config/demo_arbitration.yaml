@@ -1,0 +1,49 @@
+# Demo: protecting a mission-critical node from CPU hogs.
+#
+# perception (mission-critical, normal scheduling) shares CPU 0 with two
+# best-effort CPU hogs and brake_control (SCHED_FIFO). perception needs 40% of
+# CPU 0 with a 30 ms deadline; with equal shares it would get only about 27%.
+#
+# 1. Default: cpu.weight by criticality (mission 1000, best effort 10).
+#    perception gets what it needs, the hogs use the rest - nobody is stopped.
+#      ... build/vrm_manager config/demo_arbitration.yaml --exit-after 30
+# 2. --equal-weights: all nodes weight 100. The arbiter sees the pressure (PSI)
+#    and the misses and degrades the hogs only as far as needed:
+#    lower weight -> throttle (cpu.max 10%) -> deactivate -> stop.
+#      ... build/vrm_manager config/demo_arbitration.yaml --equal-weights --exit-after 30
+# 3. --equal-weights --no-arbitration: nothing protects perception.
+system: demo_arbitration
+transition_timeout_ms: 3000
+
+arbitration:
+  cpu_pressure_threshold: 0.25   # waiting for CPU above 25% of the time: throttle hogs
+  miss_rounds: 2                 # deadline misses in 2 rounds in a row: deactivate / stop
+  escalation_interval_s: 2
+  recovery_s: 10
+  throttle_cpu: 0.1
+
+nodes:
+  - name: brake_control
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "2", "--deadline-ms", "4"]
+    criticality: safety_critical
+    priority: 80
+    resources: {memory: 64Mi, cpus: [0]}
+
+  - name: perception
+    executable: vrm_demo_node
+    args: ["--period-ms", "50", "--work-ms", "20", "--deadline-ms", "30"]
+    criticality: mission_critical
+    resources: {memory: 128Mi, cpus: [0]}
+
+  - name: map_renderer
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "10", "--no-deadline"]
+    criticality: best_effort
+    resources: {cpu: 1.0, memory: 128Mi, cpus: [0]}
+
+  - name: infotainment
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "10", "--no-deadline"]
+    criticality: best_effort
+    resources: {cpu: 1.0, memory: 128Mi, cpus: [0]}

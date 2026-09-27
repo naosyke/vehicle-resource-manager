@@ -1,6 +1,9 @@
 #include "vrm/managed_node.hpp"
 
+#include <dirent.h>
 #include <sched.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -151,8 +154,40 @@ void ManagedNode::run_tick(std::chrono::steady_clock::time_point& next_tick) {
     if (skipped) monitor_.record_skipped(skipped);
 }
 
+namespace {
+
+// For a SCHED_FIFO node: lock memory so page faults cannot stall a tick, and
+// move DDS's helper threads (created with the inherited real-time policy) to
+// normal scheduling, so communication never delays the periodic work.
+void prepare_realtime(const std::string& name) {
+    if (sched_getscheduler(0) != SCHED_FIFO) return;
+
+    // MCL_ONFAULT: lock pages as they are touched. Without it mlockall would
+    // populate every mapping up front - including 8 MiB of stack per DDS
+    // thread - and put a small node right at its memory limit.
+    if (mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0) {
+        log::warn(name, "mlockall failed; memory is not locked (missing CAP_IPC_LOCK?)");
+    }
+    const pid_t self = static_cast<pid_t>(syscall(SYS_gettid));
+    int demoted = 0;
+    if (DIR* tasks = opendir("/proc/self/task")) {
+        while (const dirent* entry = readdir(tasks)) {
+            const pid_t tid = std::atoi(entry->d_name);
+            if (tid <= 0 || tid == self) continue;
+            sched_param normal{};
+            if (sched_setscheduler(tid, SCHED_OTHER, &normal) == 0) ++demoted;
+        }
+        closedir(tasks);
+    }
+    log::info(name, "real-time setup: memory locked, " + std::to_string(demoted) +
+                        " DDS threads moved to SCHED_OTHER");
+}
+
+}  // namespace
+
 int ManagedNode::run() {
     using Clock = std::chrono::steady_clock;
+    prepare_realtime(name_);
     publish_status(machine_.state(), 0, true, "started");
     log::info(name_, "started (pid " + std::to_string(getpid()) + "), waiting for commands");
 

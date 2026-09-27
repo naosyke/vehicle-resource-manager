@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "lifecycle_client.hpp"
+#include "vrm/arbiter.hpp"
 #include "vrm/cgroup.hpp"
 #include "vrm/manifest.hpp"
 
@@ -32,8 +33,10 @@ public:
     // Without a CgroupManager, resource budgets are not enforced. With
     // `realtime` false, nodes run with normal scheduling regardless of their
     // priority (for comparisons). `manager_id` identifies this run (random when 0).
+    // With `criticality_weights` false every node gets cpu.weight 100 unless
+    // its manifest sets one (for comparisons).
     Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, bool realtime = true,
-            std::uint64_t manager_id = 0);
+            bool arbitration = true, bool criticality_weights = true, std::uint64_t manager_id = 0);
     ~Manager();
 
     // Returns false when a safety-critical node could not be started.
@@ -68,6 +71,7 @@ private:
         CgroupUsage usage;  // Latest sample.
         std::chrono::steady_clock::time_point sampled_at;
         double cpu_percent = 0.0;  // 100% = one core, over the last sample interval.
+        double cpu_pressure = 0.0; // Share of time waiting for CPU, over the last sample interval.
 
         // Supervision
         std::chrono::steady_clock::time_point spawned_at;
@@ -79,12 +83,24 @@ private:
         std::uint64_t seen_heartbeat = 0;    // Last heartbeat counter processed.
         std::uint64_t unreported_misses = 0;
         std::uint32_t unreported_max_response_us = 0;  // Worst response since the last report.
+        std::uint64_t misses_for_arbiter = 0;          // Misses since the last arbitration round.
+
+        // Arbitration
+        std::string arbitration_state;  // "throttled", "deactivated", "stopped", "demoted" or empty.
+        std::string arbitration_reason;
         std::chrono::steady_clock::time_point misses_reported_at;
         std::chrono::steady_clock::time_point rt_overrun_reported_at;
     };
 
     int rt_priority(const NodeSpec& spec) const { return realtime_ ? spec.priority : 0; }
+    int cpu_weight(const NodeSpec& spec) const {
+        return spec.resources.cpu_weight ? *spec.resources.cpu_weight
+                                         : criticality_weights_ ? default_cpu_weight(spec.criticality) : 100;
+    }
     void supervise_node(RunningNode& node);
+    void arbitrate();
+    void apply(const ArbiterAction& action);
+    void demote_to_normal_scheduling(RunningNode& node);
     void schedule_restart(RunningNode& node);
 
     bool start_node(RunningNode& node);
@@ -109,6 +125,9 @@ private:
     SystemManifest manifest_;
     std::unique_ptr<CgroupManager> cgroups_;
     bool realtime_;
+    bool criticality_weights_;
+    Arbiter arbiter_;
+    std::chrono::steady_clock::time_point last_arbitration_;
     bool stopping_ = false;
     LifecycleClient client_;
     std::vector<RunningNode> nodes_;  // In start order.

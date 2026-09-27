@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -39,6 +40,9 @@ std::vector<int> parse_cpu_list(std::string_view text);
 // Parses "key value" lines (cpu.stat, memory.events).
 std::map<std::string, std::uint64_t> parse_flat_keyed(std::string_view text);
 
+// "some avg10=0.00 avg60=0.00 avg300=0.00 total=1234" -> 1234 (the "some" line).
+std::uint64_t parse_pressure_total(std::string_view text);
+
 // 67108864 -> "64.0Mi"
 std::string format_bytes(std::uint64_t bytes);
 
@@ -51,6 +55,10 @@ struct CgroupUsage {
     std::uint64_t memory_current = 0;
     std::uint64_t memory_peak = 0;
     std::uint64_t oom_kills = 0;       // Processes killed for exceeding memory.max.
+    // Pressure stall information: total time (us) in which some task of the
+    // group was waiting for CPU / memory. Differences give the pressure.
+    std::uint64_t cpu_pressure_usec = 0;
+    std::uint64_t memory_pressure_usec = 0;
 };
 
 class CgroupManager {
@@ -70,6 +78,12 @@ public:
     std::string create_group(const std::string& node, const ResourceBudget& budget);
 
     CgroupUsage usage(const std::string& node) const;
+
+    // Changes a node's CPU limit at runtime (nullopt = unlimited).
+    void set_cpu_max(const std::string& node, std::optional<double> cores);
+
+    // Changes a node's share of CPU when nodes compete (1-10000).
+    void set_cpu_weight(const std::string& node, int weight);
 
     // Removes the (empty) group of a node that has exited.
     void remove_group(const std::string& node);

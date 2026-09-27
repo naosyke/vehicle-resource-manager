@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -130,7 +131,49 @@ nodes:
     EXPECT_EQ(manifest.nodes[0].max_restarts, 3);
 }
 
+TEST(Manifest, ArbitrationSettings) {
+    const auto manifest = parse_manifest(R"(
+arbitration:
+  enabled: true
+  cpu_pressure_threshold: 0.2
+  recovery_s: 10
+  throttle_cpu: 0.05
+nodes:
+  - {name: a, executable: x}
+)");
+    EXPECT_TRUE(manifest.arbitration.enabled);
+    EXPECT_DOUBLE_EQ(manifest.arbitration.cpu_pressure_threshold, 0.2);
+    EXPECT_DOUBLE_EQ(manifest.arbitration.recovery_seconds, 10);
+    EXPECT_DOUBLE_EQ(manifest.arbitration.throttle_cpu_cores, 0.05);
+    EXPECT_DOUBLE_EQ(manifest.arbitration.memory_stop_fraction, 0.9);  // Default.
+    EXPECT_THROW(parse_manifest("arbitration: {cpu_pressure_threshold: 2}\nnodes: [{name: a, executable: x}]"),
+                 ManifestError);
+}
+
 TEST(Manifest, RejectsInvalidRestartSettings) {
     EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, restart: always}]"), ManifestError);
     EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, max_restarts: -1}]"), ManifestError);
+}
+
+TEST(Manifest, CpuWeightDefaultsFollowCriticality) {
+    EXPECT_EQ(vrm::default_cpu_weight(Criticality::SafetyCritical), 10000);
+    EXPECT_EQ(vrm::default_cpu_weight(Criticality::MissionCritical), 1000);
+    EXPECT_EQ(vrm::default_cpu_weight(Criticality::BestEffort), 10);
+
+    const auto manifest = parse_manifest("nodes: [{name: a, executable: x, resources: {cpu_weight: 250}}]");
+    EXPECT_EQ(*manifest.nodes[0].resources.cpu_weight, 250);
+    EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, resources: {cpu_weight: 0}}]"), ManifestError);
+}
+
+TEST(Manifest, AllConfigFilesAreValid) {
+    int checked = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(VRM_CONFIG_DIR)) {
+        if (entry.path().extension() != ".yaml") continue;
+        SCOPED_TRACE(entry.path().string());
+        const auto manifest = vrm::load_manifest(entry.path().string());
+        EXPECT_FALSE(manifest.nodes.empty());
+        EXPECT_NO_THROW(vrm::startup_order(manifest));
+        ++checked;
+    }
+    EXPECT_GE(checked, 8);
 }

@@ -29,6 +29,13 @@ TEST(CgroupHelpers, FlatKeyedFiles) {
     EXPECT_EQ(stat.count("missing"), 0u);
 }
 
+TEST(CgroupHelpers, PressureTotal) {
+    EXPECT_EQ(vrm::parse_pressure_total("some avg10=9.05 avg60=1.63 avg300=0.34 total=1255392\n"
+                                        "full avg10=8.87 avg60=1.60 avg300=0.33 total=1254964\n"),
+              1255392u);
+    EXPECT_EQ(vrm::parse_pressure_total(""), 0u);
+}
+
 TEST(CgroupHelpers, FormatBytes) {
     EXPECT_EQ(vrm::format_bytes(512), "512B");
     EXPECT_EQ(vrm::format_bytes(64ull * 1024 * 1024), "64.0Mi");

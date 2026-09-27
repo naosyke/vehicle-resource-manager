@@ -72,6 +72,15 @@ std::map<std::string, std::uint64_t> parse_flat_keyed(std::string_view text) {
     return values;
 }
 
+std::uint64_t parse_pressure_total(std::string_view text) {
+    const auto line_end = text.find('\n');
+    const auto some = text.substr(0, line_end);
+    if (some.rfind("some", 0) != 0) return 0;
+    const auto total = some.find("total=");
+    if (total == std::string_view::npos) return 0;
+    return std::stoull(std::string(some.substr(total + 6)));
+}
+
 std::string format_bytes(std::uint64_t bytes) {
     const char* units[] = {"B", "Ki", "Mi", "Gi"};
     double value = static_cast<double>(bytes);
@@ -237,6 +246,9 @@ std::string CgroupManager::create_group(const std::string& node, const ResourceB
     if (budget.cpu_cores) {
         write_or_throw(path + "/cpu.max", format_cpu_max(*budget.cpu_cores));
     }
+    if (budget.cpu_weight) {
+        write_or_throw(path + "/cpu.weight", std::to_string(*budget.cpu_weight));
+    }
     if (budget.memory_bytes) {
         write_or_throw(path + "/memory.max", std::to_string(*budget.memory_bytes));
         // Without this the kernel could swap instead of enforcing the limit.
@@ -274,7 +286,17 @@ CgroupUsage CgroupManager::usage(const std::string& node) const {
     usage.memory_current = number(read_optional(path + "/memory.current"));
     usage.memory_peak = number(read_optional(path + "/memory.peak"));
     usage.oom_kills = value(events, "oom_kill");
+    usage.cpu_pressure_usec = parse_pressure_total(read_optional(path + "/cpu.pressure"));
+    usage.memory_pressure_usec = parse_pressure_total(read_optional(path + "/memory.pressure"));
     return usage;
+}
+
+void CgroupManager::set_cpu_max(const std::string& node, std::optional<double> cores) {
+    write_or_throw(group_path(node) + "/cpu.max", cores ? format_cpu_max(*cores) : "max 100000");
+}
+
+void CgroupManager::set_cpu_weight(const std::string& node, int weight) {
+    write_or_throw(group_path(node) + "/cpu.weight", std::to_string(weight));
 }
 
 void CgroupManager::remove_group(const std::string& node) {

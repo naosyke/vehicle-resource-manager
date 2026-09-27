@@ -38,6 +38,7 @@ flowchart LR
 | `LifecycleClient` | `src/manager/lifecycle_client.cpp` | Manager side: sends commands, tracks node status |
 | `Manager` | `src/manager/manager.cpp` | Startup, supervision (heartbeat, deadlines, restarts), degradation rules, shutdown |
 | `DeadlineMonitor` | `src/core/deadline_monitor.cpp` | Latency, response time and deadline misses of periodic work |
+| `Arbiter` | `src/core/arbiter.cpp` | Arbitration policy: which node to throttle, deactivate, stop, restore or demote |
 
 ## 2. Node Lifecycle
 
@@ -168,6 +169,7 @@ flowchart TB
 | Manifest | cgroup file | Effect |
 |---|---|---|
 | `cpu: 0.5` | `cpu.max` = `50000 100000` | At most 50 ms of CPU time per 100 ms period; then the group is throttled |
+| `cpu_weight` (default by criticality) | `cpu.weight` | Share of CPU when groups compete: safety 10000, mission 1000, best effort 10. Not a cap - an idle CPU is used by anyone |
 | `memory: 64Mi` | `memory.max`, `memory.swap.max = 0` | Allocations beyond the limit trigger reclaim, then the OOM killer inside this group only |
 | `cpus: [0]` | `cpuset.cpus` = `0` | The node's threads may only run on CPU 0 |
 
@@ -221,15 +223,20 @@ and is inherited by the node's DDS threads. A `SCHED_FIFO` task runs as soon
 as it is ready and is only preempted by higher real-time priorities, so
 normal (`SCHED_OTHER`) tasks on the same CPU cannot delay it.
 
+When a node starts as `SCHED_FIFO`, it also locks its memory (`mlockall`)
+so page faults cannot stall a tick, and moves the helper threads DDS created
+(which inherited the real-time policy) to `SCHED_OTHER`, so communication
+never delays the periodic work.
+
 The node reports the policy the kernel actually applied in its heartbeat;
 the manager warns when it differs from the manifest (e.g. no `CAP_SYS_NICE`).
 
 **`cpu.max` does not limit `SCHED_FIFO` tasks.** cgroup v2 CPU bandwidth
 control applies to normal tasks only; a runaway real-time task is limited
 only by the kernel's global real-time throttling
-(`sched_rt_runtime_us` = 95 % per second). The manager therefore only
-*monitors* the CPU budget of real-time nodes and warns when it is exceeded.
-Acting on it (e.g. demoting the node) is part of phase 4.
+(`sched_rt_runtime_us` = 95 % per second). The manager monitors the CPU
+budget of real-time nodes, and the arbiter demotes a node that keeps
+exceeding it (section 8).
 
 **Environment limits.** Docker Desktop runs Linux in a virtual machine
 without a `PREEMPT_RT` kernel. `cyclictest` measures kernel wake-up latencies
@@ -286,9 +293,90 @@ after 250 ms, 500 ms, 1 s, 2 s, then 4 s, up to `max_restarts` (default 3).
 When a safety-critical node reaches its limit, the manager reports the system
 as degraded.
 
-## 8. Planned
+## 8. Resource Arbitration
 
-Phase 4 adds pressure-based arbitration (PSI) and acting on budget overruns
-(including demoting real-time nodes that exceed their CPU budget), so that
-lower-criticality nodes are throttled or stopped before they can interfere
-with safety-critical ones.
+Scheduling priority prevents interference for real-time nodes. Arbitration
+handles the rest: nodes that are not real-time but still important, memory,
+and real-time nodes that misbehave. The policy (`Arbiter`,
+[`src/core/arbiter.cpp`](../src/core/arbiter.cpp)) is pure logic: every 0.5 s
+the manager passes it the measurements of all nodes and carries out the
+actions it returns.
+
+### First line: CPU shares by criticality
+
+Before arbitration does anything, every node's cgroup gets a `cpu.weight`
+by criticality (safety 10000, mission 1000, best effort 10). When nodes
+compete, the CPU is split in that ratio; when a critical node sleeps, the
+others use the idle time. In the arbitration demo this alone lets perception
+meet every deadline while the best-effort hogs keep running on the rest of
+the CPU, and the arbiter never has to act. Unlike `cpu.max`, a weight never
+leaves a CPU idle.
+
+### Degradation ladder
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    Normal --> Yielding: interference
+    Yielding --> Throttled: deadline misses persist
+    Throttled --> Deactivated: deadline misses persist
+    Deactivated --> Stopped: deadline misses persist
+    Yielding --> Normal: calm for recovery_s
+    Throttled --> Yielding: calm for recovery_s
+    Deactivated --> Throttled: calm for recovery_s
+```
+
+| Level | Action | Effect |
+|---|---|---|
+| Yielding | `cpu.weight` = `lowered_cpu_weight` (1) | The node still uses idle CPU but gives way to everyone else |
+| Throttled | `cpu.max` = `throttle_cpu` (10 %) | The node keeps working, slower, even when the CPU is idle |
+| Deactivated | lifecycle `deactivate` | Periodic work stops; the process stays alive and can resume instantly |
+| Stopped | lifecycle `shutdown` | The node is gone until the next start |
+
+### Triggers
+
+| Signal | Source | Allows |
+|---|---|---|
+| A protected node waits for CPU more than `cpu_pressure_threshold` (25 %) | PSI `cpu.pressure` of its cgroup, difference of `total` between samples | Lowering weights only (costs nothing when the CPU is idle) - part of the wait is caused by more critical nodes, which is legitimate. Ignored for `SCHED_FIFO` nodes: their only waits are for their own threads or other real-time tasks, which throttling normal tasks cannot help |
+| A protected node misses deadlines in `miss_rounds` (2) consecutive rounds | Heartbeats | The whole ladder - this is actual harm; a single spike (e.g. a VM stall) is ignored |
+
+Protected nodes are safety- and mission-critical ones. A victim must be
+strictly less critical than the suffering node, able to run on the same CPU
+(overlapping `cpuset`, or unpinned), and able to delay it at all: a
+`SCHED_FIFO` node preempts every normal task, so only other real-time nodes
+are considered for it. Its misses without real-time competition (e.g. VM
+stalls) therefore degrade nothing. Among candidates: least critical
+first, then the least degraded (throttle everyone before deactivating
+anyone), then the lowest priority, then the biggest CPU user. One step is
+taken per `escalation_interval_s`, so the effect of each step can be seen
+before the next.
+
+### Recovery and hysteresis
+
+After `recovery_s` without interference, the most critical degraded node is
+restored one step (a deactivated node before a throttled one). If the
+interference returns right after a restore, the calm period doubles (up to
+8x), so the system does not flap between two states. Stopped nodes stay
+stopped.
+
+### Memory and real-time overruns
+
+| Situation | Action |
+|---|---|
+| `memory.current` ≥ 90 % of `memory.max` (not safety-critical) | Graceful `deactivate` + `shutdown`, before the OOM killer kills the node |
+| `SCHED_FIFO` node above its CPU budget for `rt_overrun_s` | Every thread is switched to `SCHED_OTHER`, so its `cpu.max` applies |
+
+Safety-critical nodes are never degraded or stopped by the arbiter.
+
+### Limits
+
+Arbitration reacts within seconds, so a few misses happen before it acts;
+it complements real-time priority rather than replacing it. In the Docker
+Desktop VM, a stall that spans two rounds can look like persistent misses and
+trigger a step that was not needed; `miss_rounds` trades reaction time
+against such false positives.
+
+## 9. Planned
+
+Resource and lifecycle telemetry over DDS, so other tools (and other ECUs)
+can subscribe to the manager's view of the system.

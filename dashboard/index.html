@@ -129,6 +129,7 @@
     <h1>Resource Dashboard <span class="muted" id="system"></span></h1>
     <span class="status" id="connection"></span>
     <span class="status" id="enforcement"></span>
+    <span class="status" id="arbitration"></span>
   </header>
 
   <section class="card">
@@ -190,6 +191,7 @@ function nodeStatus(node) {
   if (node.outcome === "failed") return status("critical", "failed");
   if (node.outcome === "skipped") return status("idle", "skipped");
   if (node.outcome === "stopped") return status("idle", "stopped");
+  if (node.running && node.state === "inactive") return status("idle", "inactive");
   return status("idle", node.state.replace("_", " "));
 }
 
@@ -274,18 +276,29 @@ function renderNodes(data) {
                         `${timing.total_misses} deadline misses`));
     }
     if (node.restarts) flags.push(status("warning", `restarted ${node.restarts}×`));
+    const arbitration = node.arbitration || {};
+    if (arbitration.state) {
+      const labels = {yielding: "yielding CPU (weight lowered)", throttled: "throttled by arbitration",
+                      deactivated: "deactivated by arbitration",
+                      stopped: "stopped by arbitration", demoted: "demoted to SCHED_OTHER"};
+      flags.push(`<span title="${escapeHtml(arbitration.reason || "")}">${status(
+        arbitration.state === "yielding" || arbitration.state === "throttled" ? "warning" : "critical",
+        labels[arbitration.state] || arbitration.state)}</span>`);
+    }
     // An OOM exit is already the node's status line.
     if (usage && usage.oom_kills && node.outcome !== "exited") flags.push(status("critical", `OOM killed ×${usage.oom_kills}`));
     if (usage && usage.nr_throttled) flags.push(status("warning", `CPU throttled ${usage.nr_throttled}×`));
     if (usage && node.running && memLimit && memFraction >= NEAR_LIMIT) flags.push(status("warning", "memory near limit"));
 
+    const waits = node.running && node.cpu_pressure >= 0.05 ? ` · waits ${(node.cpu_pressure * 100).toFixed(0)}%` : "";
     const cpuValue = usage
-      ? `${usage.cpu_percent.toFixed(1)}% of ${budget.cpu_cores ? `${cpuLimit.toFixed(0)}%` : "no limit"}`
+      ? `${usage.cpu_percent.toFixed(1)}% of ${budget.cpu_cores ? `${cpuLimit.toFixed(0)}%` : "no limit"}${waits}`
       : "not measured";
     const memValue = usage
       ? `${formatBytes(usage.memory_bytes)} / ${memLimit ? formatBytes(memLimit) : "no limit"} · peak ${formatBytes(usage.memory_peak_bytes)}`
       : "not measured";
     const pinnedText = (budget.cpus.length ? `CPU ${budget.cpus.join(", ")}` : "any CPU") +
+      (budget.cpu_weight ? ` · weight ${budget.cpu_weight}` : "") +
       (timing ? ` · every ${formatMs(timing.period_us).replace(".00", "")}` : "");
     const schedText = sched.policy
       ? (sched.priority ? `${sched.policy} ${sched.priority}` : sched.policy)
@@ -411,6 +424,9 @@ async function refresh() {
     document.getElementById("enforcement").outerHTML = data.cgroups
       ? `<span class="status" id="enforcement">${ICONS.good}<span>Budgets enforced (cgroup v2)</span></span>`
       : `<span class="status" id="enforcement">${ICONS.warning}<span>Budgets NOT enforced</span></span>`;
+    document.getElementById("arbitration").outerHTML = data.arbitration
+      ? `<span class="status" id="arbitration">${ICONS.good}<span>Arbitration on</span></span>`
+      : `<span class="status" id="arbitration">${ICONS.idle}<span>Arbitration off</span></span>`;
     document.getElementById("system").textContent = data.system;
 
     renderCores(data);

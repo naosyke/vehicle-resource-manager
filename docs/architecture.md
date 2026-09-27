@@ -105,6 +105,15 @@ sequenceDiagram
     N-->>M: status active (request 2, success)
 ```
 
+**Manager id.** Every manager run picks a random 64-bit id and passes it to
+the nodes it starts through the `VRM_MANAGER_ID` environment variable. Both
+topics are keyed by `(manager_id, node)`: a node ignores commands from other
+managers, and a manager ignores status from other systems' nodes. Without
+this, two systems that use the same node names on one network (for example
+two containers on the same Docker network) would stop each other's nodes,
+because DDS discovery connects them automatically. It also keeps request ids
+unambiguous when a manager restarts.
+
 **Resend and idempotency.** Because the command topic is volatile, a command
 written before DDS discovery has matched the node's reader would be lost.
 The manager therefore resends the command every 300 ms until the node replies
@@ -186,7 +195,20 @@ When cgroups are not writable (for example an unprivileged container), the
 manager logs a warning and runs without enforcement; `--require-cgroups`
 turns that into an error.
 
-## 6. Planned
+## 6. Dashboard
+
+With `--status-file PATH`, the manager writes a JSON snapshot every
+`--status-interval` seconds (default 1): per node the lifecycle state,
+outcome, budget and measured usage, plus the last 100 events. It writes to a
+temporary file and renames it, so a reader never sees a partial file.
+`dashboard/index.html` polls the file and keeps a 60 second history in the
+browser.
+
+```text
+vrm_manager ──(write + rename every 1 s)──▶ status/status.json ◀──(fetch every 1 s)── dashboard/index.html
+```
+
+## 7. Planned
 
 Phase 3 adds SCHED_FIFO priorities and heartbeat / deadline monitoring;
 phase 4 adds pressure-based arbitration (PSI), so that lower-criticality nodes

@@ -24,13 +24,14 @@ struct LifecycleClient::Dds {
         subscriber, status_topic, dds_lifecycle::status_reader_qos(subscriber)};
 };
 
-LifecycleClient::LifecycleClient() : dds_(std::make_unique<Dds>()) {}
+LifecycleClient::LifecycleClient(std::uint64_t manager_id)
+    : dds_(std::make_unique<Dds>()), manager_id_(manager_id) {}
 LifecycleClient::~LifecycleClient() = default;
 
 void LifecycleClient::poll() {
     for (const auto& sample : dds_->status_reader.take()) {
-        if (!sample.info().valid()) {
-            continue;
+        if (!sample.info().valid() || sample.data().manager_id() != manager_id_) {
+            continue;  // Another system's node.
         }
         const auto& data = sample.data();
         NodeStatus next{dds_lifecycle::from_msg(data.state()), data.request_id(), data.success(),
@@ -48,6 +49,9 @@ void LifecycleClient::poll() {
             } else {
                 log::warn("manager", data.node() + ": " + line);
             }
+            current = next;
+            if (listener_) listener_(data.node(), next);
+            continue;
         }
         current = next;
     }
@@ -81,7 +85,7 @@ bool LifecycleClient::wait_for_state(const std::string& node, int pid, State sta
 RequestResult LifecycleClient::request(const std::string& node, Transition transition,
                                        std::chrono::milliseconds timeout, const std::function<bool()>& alive) {
     const std::uint32_t id = next_request_id_++;
-    const msg::LifecycleCommand command(node, id, dds_lifecycle::to_msg(transition));
+    const msg::LifecycleCommand command(manager_id_, node, id, dds_lifecycle::to_msg(transition));
 
     const auto start = std::chrono::steady_clock::now();
     auto next_send = start;

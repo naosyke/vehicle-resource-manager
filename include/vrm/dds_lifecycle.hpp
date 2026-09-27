@@ -12,6 +12,9 @@ namespace vrm::dds_lifecycle {
 inline constexpr const char* kCommandTopic = "vrm_lifecycle_command";
 inline constexpr const char* kStatusTopic = "vrm_lifecycle_status";
 
+// Environment variable through which the manager passes its id to nodes.
+inline constexpr const char* kManagerIdEnv = "VRM_MANAGER_ID";
+
 State from_msg(msg::LifecycleState state);
 msg::LifecycleState to_msg(State state);
 Transition from_msg(msg::LifecycleTransition transition);

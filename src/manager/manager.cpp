@@ -2,10 +2,16 @@
 
 #include <signal.h>
 
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <random>
+#include <sstream>
 #include <thread>
 
 #include "process.hpp"
+#include "vrm/dds_lifecycle.hpp"
 #include "vrm/log.hpp"
 #include "vrm/managed_node.hpp"
 
@@ -13,6 +19,50 @@ namespace vrm {
 
 namespace {
 constexpr auto kExitGracePeriod = std::chrono::milliseconds(2000);
+constexpr std::size_t kMaxEvents = 100;
+
+double now_seconds() {
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::string json_string(std::string_view text) {
+    std::string out = "\"";
+    for (const char c : text) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char escaped[8];
+                    std::snprintf(escaped, sizeof(escaped), "\\u%04x", c);
+                    out += escaped;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out + "\"";
+}
+
+std::string json_int_list(const std::vector<int>& values) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < values.size(); ++i) out += (i ? "," : "") + std::to_string(values[i]);
+    return out + "]";
+}
+
+std::uint64_t random_manager_id() {
+    std::random_device device;
+    std::mt19937_64 generator((static_cast<std::uint64_t>(device()) << 32) ^ device());
+    std::uint64_t id = 0;
+    while (id == 0) id = generator();  // 0 means "no manager".
+    return id;
+}
+
+const char* level_name(int level) {
+    return level == 0 ? "info" : level == 1 ? "warn" : "error";
+}
 }  // namespace
 
 std::string_view to_string(NodeOutcome outcome) {
@@ -27,13 +77,31 @@ std::string_view to_string(NodeOutcome outcome) {
     return "unknown";
 }
 
-Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups)
-    : manifest_(std::move(manifest)), cgroups_(std::move(cgroups)) {
+Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, std::uint64_t manager_id)
+    : manifest_(std::move(manifest)),
+      cgroups_(std::move(cgroups)),
+      client_(manager_id ? manager_id : random_manager_id()) {
     for (const auto* spec : startup_order(manifest_)) {
         RunningNode node{};
         node.spec = spec;
         nodes_.push_back(node);
     }
+    client_.set_state_listener([this](const std::string& node, const NodeStatus& status) {
+        std::string message = node + " -> " + std::string(to_string(status.state));
+        if (!status.message.empty()) message += " (" + status.message + ")";
+        events_.push_back({now_seconds(), status.success ? Level::Info : Level::Warn, node, message});
+        while (events_.size() > kMaxEvents) events_.pop_front();
+    });
+}
+
+void Manager::note(Level level, const std::string& node, const std::string& message) {
+    switch (level) {
+        case Level::Info: log::info("manager", message); break;
+        case Level::Warn: log::warn("manager", message); break;
+        case Level::Error: log::error("manager", message); break;
+    }
+    events_.push_back({now_seconds(), level, node, message});
+    while (events_.size() > kMaxEvents) events_.pop_front();
 }
 
 Manager::~Manager() { stop(); }
@@ -67,11 +135,8 @@ void Manager::reap_children() {
                 node.detail = description;
                 const auto message = node.spec->name + " (" + std::string(to_string(node.spec->criticality)) +
                                      ") " + description + " unexpectedly";
-                if (node.spec->criticality == Criticality::SafetyCritical) {
-                    log::error("manager", message);
-                } else {
-                    log::warn("manager", message);
-                }
+                note(node.spec->criticality == Criticality::SafetyCritical ? Level::Error : Level::Warn,
+                     node.spec->name, message);
             }
         }
     }
@@ -85,7 +150,7 @@ bool Manager::is_running(const RunningNode& node) {
 void Manager::fail_node(RunningNode& node, const std::string& reason) {
     node.outcome = NodeOutcome::Failed;
     node.detail = reason;
-    log::error("manager", node.spec->name + " failed to start: " + reason);
+    note(Level::Error, node.spec->name, node.spec->name + " failed to start: " + reason);
     if (is_running(node)) {
         const auto alive = [&] { return is_running(node); };
         client_.request(node.spec->name, Transition::Shutdown, manifest_.transition_timeout, alive);
@@ -99,7 +164,7 @@ bool Manager::start_node(RunningNode& node) {
         if (!required || required->outcome != NodeOutcome::Active) {
             node.outcome = NodeOutcome::Skipped;
             node.detail = "dependency '" + dependency + "' is not active";
-            log::warn("manager", spec.name + " skipped: " + node.detail);
+            note(Level::Warn, spec.name, spec.name + " skipped: " + node.detail);
             return false;
         }
     }
@@ -113,16 +178,18 @@ bool Manager::start_node(RunningNode& node) {
             cgroup_procs = cgroups_->create_group(spec.name, spec.resources);
             node.in_cgroup = true;
         }
-        node.pid = spawn_process(executable, args, cgroup_procs);
+        const std::string manager_env =
+            std::string(dds_lifecycle::kManagerIdEnv) + "=" + std::to_string(client_.manager_id());
+        node.pid = spawn_process(executable, args, cgroup_procs, {manager_env});
     } catch (const std::exception& error) {
         node.outcome = NodeOutcome::Failed;
         node.detail = error.what();
-        log::error("manager", spec.name + " could not be spawned: " + error.what());
+        note(Level::Error, spec.name, spec.name + " could not be spawned: " + error.what());
         return false;
     }
     node.running = true;
-    log::info("manager", "spawned " + spec.name + " (pid " + std::to_string(node.pid) + ", " +
-                             std::string(to_string(spec.criticality)) + ")");
+    note(Level::Info, spec.name, "spawned " + spec.name + " (pid " + std::to_string(node.pid) + ", " +
+                                     std::string(to_string(spec.criticality)) + ")");
 
     const auto alive = [&] { return is_running(node); };
     if (!client_.wait_for_state(spec.name, node.pid, State::Unconfigured, manifest_.transition_timeout, alive)) {
@@ -143,19 +210,20 @@ bool Manager::start_node(RunningNode& node) {
 }
 
 bool Manager::start() {
-    log::info("manager", "starting system '" + manifest_.name + "' with " +
-                             std::to_string(nodes_.size()) + " nodes");
+    note(Level::Info, "", "starting system '" + manifest_.name + "' with " + std::to_string(nodes_.size()) +
+                              " nodes (manager id " + std::to_string(client_.manager_id()) + ")");
     for (auto& node : nodes_) {
         if (g_stop_requested) {
             return true;
         }
         if (!start_node(node) && node.spec->criticality == Criticality::SafetyCritical) {
-            log::error("manager", "safety-critical node " + node.spec->name +
-                                      " is not available; aborting startup");
+            note(Level::Error, node.spec->name,
+                 "safety-critical node " + node.spec->name + " is not available; aborting startup");
             return false;
         }
     }
-    log::info("manager", "startup complete");
+    note(Level::Info, "", "startup complete");
+    write_status();
     print_summary();
     return true;
 }
@@ -167,10 +235,15 @@ void Manager::supervise(std::chrono::milliseconds duration, std::chrono::millise
         if (node.in_cgroup) sample_resources(node);  // Baseline for CPU usage.
     }
 
+    auto next_status = start;
     while (!g_stop_requested) {
         const auto now = std::chrono::steady_clock::now();
         if (duration.count() > 0 && now - start >= duration) {
             break;
+        }
+        if (!status_path_.empty() && now >= next_status) {
+            write_status();
+            next_status += status_interval_;
         }
         if (cgroups_ && report_interval.count() > 0 && now >= next_report) {
             print_resources();
@@ -195,13 +268,103 @@ void Manager::sample_resources(RunningNode& node) {
     node.sampled_at = now;
 }
 
+void Manager::sample_if_stale(RunningNode& node) {
+    // Keep at least 500 ms between samples so CPU percentages are stable.
+    if (std::chrono::steady_clock::now() - node.sampled_at >= std::chrono::milliseconds(500)) {
+        sample_resources(node);
+    }
+}
+
+void Manager::set_status_file(std::string path, std::chrono::milliseconds interval) {
+    status_path_ = std::move(path);
+    status_interval_ = interval;
+    const auto directory = std::filesystem::path(status_path_).parent_path();
+    std::error_code error;
+    if (!directory.empty()) std::filesystem::create_directories(directory, error);
+    if (error) {
+        log::warn("manager", "cannot create " + directory.string() + ": " + error.message());
+    }
+}
+
+void Manager::write_status() {
+    if (status_path_.empty()) return;
+
+    std::ostringstream json;
+    json << "{\"system\":" << json_string(manifest_.name) << ",\"timestamp\":" << std::fixed << now_seconds()
+         << ",\"cgroups\":" << (cgroups_ ? "true" : "false")
+         << ",\"available_cpus\":" << json_int_list(cgroups_ ? cgroups_->available_cpus() : std::vector<int>{})
+         << ",\"nodes\":[";
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+        auto& node = nodes_[i];
+        if (node.in_cgroup && node.running) sample_if_stale(node);
+        const auto& spec = *node.spec;
+        const auto status = client_.status(spec.name);
+        const std::string state = status && node.pid != 0 && status->pid == node.pid
+                                      ? std::string(to_string(status->state))
+                                      : "not_started";
+        json << (i ? "," : "") << "{\"name\":" << json_string(spec.name)
+             << ",\"criticality\":" << json_string(to_string(spec.criticality))
+             << ",\"priority\":" << spec.priority << ",\"pid\":" << node.pid
+             << ",\"running\":" << (node.running ? "true" : "false") << ",\"state\":" << json_string(state)
+             << ",\"outcome\":" << json_string(to_string(node.outcome))
+             << ",\"detail\":" << json_string(node.detail) << ",\"depends_on\":[";
+        for (std::size_t d = 0; d < spec.depends_on.size(); ++d) {
+            json << (d ? "," : "") << json_string(spec.depends_on[d]);
+        }
+        json << "],\"budget\":{\"cpu_cores\":";
+        if (spec.resources.cpu_cores) json << *spec.resources.cpu_cores; else json << "null";
+        json << ",\"memory_bytes\":";
+        if (spec.resources.memory_bytes) json << *spec.resources.memory_bytes; else json << "null";
+        json << ",\"cpus\":" << json_int_list(spec.resources.cpus) << "}";
+        if (node.in_cgroup) {
+            json << ",\"usage\":{\"cpu_percent\":" << (node.running ? node.cpu_percent : 0.0)
+                 << ",\"memory_bytes\":" << node.usage.memory_current
+                 << ",\"memory_peak_bytes\":" << node.usage.memory_peak
+                 << ",\"nr_throttled\":" << node.usage.nr_throttled
+                 << ",\"throttled_usec\":" << node.usage.throttled_usec
+                 << ",\"oom_kills\":" << node.usage.oom_kills << "}";
+        } else {
+            json << ",\"usage\":null";
+        }
+        json << "}";
+    }
+    json << "],\"events\":[";
+    for (std::size_t i = 0; i < events_.size(); ++i) {
+        const auto& event = events_[i];
+        json << (i ? "," : "") << "{\"time\":" << event.time
+             << ",\"level\":" << json_string(level_name(static_cast<int>(event.level)))
+             << ",\"node\":" << json_string(event.node) << ",\"message\":" << json_string(event.message) << "}";
+    }
+    json << "]}\n";
+
+    // Write then rename, so readers never see a half-written file.
+    const std::string temporary = status_path_ + ".tmp";
+    FILE* file = std::fopen(temporary.c_str(), "w");
+    bool ok = file != nullptr;
+    int error = ok ? 0 : errno;
+    if (file) {
+        const auto text = json.str();
+        ok = std::fwrite(text.data(), 1, text.size(), file) == text.size();
+        ok = (std::fclose(file) == 0) && ok;
+        if (ok && std::rename(temporary.c_str(), status_path_.c_str()) != 0) ok = false;
+        if (!ok) error = errno;
+    }
+    // Warn once per failure streak, not every second.
+    if (!ok && !status_write_failed_) {
+        log::warn("manager", "cannot write status file " + status_path_ + ": " + std::strerror(error));
+    } else if (ok && status_write_failed_) {
+        log::info("manager", "status file " + status_path_ + " is being written again");
+    }
+    status_write_failed_ = !ok;
+}
+
 void Manager::print_resources() {
     if (!cgroups_) return;
     std::printf("\n%-20s %7s %6s %9s %9s %9s %9s %4s\n", "RESOURCES", "CPU", "LIMIT", "MEMORY", "PEAK",
                 "LIMIT", "THROTTLED", "OOM");
     for (auto& node : nodes_) {
         if (!node.in_cgroup) continue;
-        if (node.running) sample_resources(node);
+        if (node.running) sample_if_stale(node);
         const auto& budget = node.spec->resources;
         const std::string cpu_limit =
             budget.cpu_cores ? std::to_string(static_cast<int>(*budget.cpu_cores * 100 + 0.5)) + "%" : "-";
@@ -224,7 +387,7 @@ void Manager::stop() {
     if (!any_running) {
         return;
     }
-    log::info("manager", "shutting down");
+    note(Level::Info, "", "shutting down");
 
     for (auto it = nodes_.rbegin(); it != nodes_.rend(); ++it) {
         auto& node = *it;
@@ -248,14 +411,15 @@ void Manager::stop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (is_running(node)) {
-            log::warn("manager", node.spec->name + " did not exit; sending SIGKILL");
+            note(Level::Warn, node.spec->name, node.spec->name + " did not exit; sending SIGKILL");
             kill(node.pid, SIGKILL);
             while (is_running(node)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
         }
     }
-    log::info("manager", "all nodes stopped");
+    note(Level::Info, "", "all nodes stopped");
+    write_status();
 }
 
 void Manager::print_summary() const {

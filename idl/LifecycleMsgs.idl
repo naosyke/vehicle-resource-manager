@@ -25,8 +25,13 @@ enum LifecycleState {
 
 // Manager -> node. Topic "vrm_lifecycle_command".
 // QoS: reliable, volatile, keep last 16.
+// Every manager run has a random manager_id and hands it to the nodes it
+// starts (environment variable VRM_MANAGER_ID). Nodes only accept commands
+// from their own manager, so two systems with the same node names on one
+// network do not control each other's nodes.
 @topic
 struct LifecycleCommand {
+    @key unsigned long long manager_id;
     @key string node;
     unsigned long request_id;
     LifecycleTransition transition;
@@ -37,6 +42,7 @@ struct LifecycleCommand {
 // (re)starts late still receives each node's current state.
 @topic
 struct LifecycleStatus {
+    @key unsigned long long manager_id;   // 0 for a node started without a manager.
     @key string node;
     LifecycleState state;
     unsigned long request_id;   // Command that caused this change, 0 if none.

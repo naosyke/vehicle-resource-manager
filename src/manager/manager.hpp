@@ -5,6 +5,7 @@
 #include <sys/types.h>
 
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,7 +30,8 @@ std::string_view to_string(NodeOutcome outcome);
 class Manager {
 public:
     // Without a CgroupManager, resource budgets are not enforced.
-    Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups);
+    // `manager_id` identifies this run (random when 0).
+    Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, std::uint64_t manager_id = 0);
     ~Manager();
 
     // Returns false when a safety-critical node could not be started.
@@ -45,6 +47,11 @@ public:
 
     void print_summary() const;
     void print_resources();
+
+    // Writes a JSON snapshot of nodes, budgets, usage and recent events to
+    // `path` every `interval` while supervising (for the dashboard).
+    void set_status_file(std::string path, std::chrono::milliseconds interval);
+    void write_status();
 
 private:
     struct RunningNode {
@@ -65,12 +72,28 @@ private:
     void reap_children();
     bool is_running(const RunningNode& node);
     void sample_resources(RunningNode& node);
+    void sample_if_stale(RunningNode& node);
+
+    enum class Level { Info, Warn, Error };
+    // Logs a message and keeps it in the recent event list.
+    void note(Level level, const std::string& node, const std::string& message);
+
+    struct Event {
+        double time;  // Unix time in seconds.
+        Level level;
+        std::string node;
+        std::string message;
+    };
     RunningNode* find(const std::string& name);
 
     SystemManifest manifest_;
     std::unique_ptr<CgroupManager> cgroups_;
     LifecycleClient client_;
     std::vector<RunningNode> nodes_;  // In start order.
+    std::deque<Event> events_;
+    std::string status_path_;
+    std::chrono::milliseconds status_interval_{1000};
+    bool status_write_failed_ = false;
 };
 
 }  // namespace vrm

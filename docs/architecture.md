@@ -84,7 +84,7 @@ Error handling (omitted from the diagram for readability):
 ## 3. Lifecycle Protocol over DDS
 
 Types are defined in [`idl/LifecycleMsgs.idl`](../idl/LifecycleMsgs.idl) and
-generated with `idlcxx`. Both topics are keyed by node name, so each node is
+[`idl/TelemetryMsgs.idl`](../idl/TelemetryMsgs.idl) and generated with `idlcxx`. Both topics are keyed by node name, so each node is
 its own DDS instance.
 
 | Topic | Type | Direction | QoS | Why |
@@ -92,6 +92,14 @@ its own DDS instance.
 | `vrm_lifecycle_command` | `LifecycleCommand` | manager → node | Reliable, Volatile, KeepLast 16 | Commands must not be lost, but are meaningless to a node that starts later |
 | `vrm_lifecycle_status` | `LifecycleStatus` | node → manager | Reliable, TransientLocal, KeepLast 1 (writer) | A manager that (re)starts late still gets each node's current state |
 | `vrm_node_heartbeat` | `NodeHeartbeat` | node → manager | BestEffort, Volatile, KeepLast 1 | Periodic; a lost sample is replaced by the next one, and missing several means the node hangs |
+| `vrm_node_status` | `NodeStatusReport` | manager → anyone | Reliable, TransientLocal, KeepLast 1 | Telemetry every second; late joiners get each node's current status |
+| `vrm_system_event` | `SystemEvent` | manager → anyone | Reliable, TransientLocal, KeepLast 100, durability service history 100 | Late joiners get the recent events |
+
+For transient-local data, what a late joiner receives is bounded by the
+*durability service* history (default: keep last 1), not by the writer's
+History policy. It is a topic-level policy, so the event topic is created
+with it and the writer takes its QoS from the topic; without it a monitor
+that starts late saw only the very last event.
 
 ```mermaid
 sequenceDiagram
@@ -390,7 +398,11 @@ Desktop VM, a stall that spans two rounds can look like persistent misses and
 trigger a step that was not needed; `miss_rounds` trades reaction time
 against such false positives.
 
-## 9. Planned
+## 9. Telemetry over DDS
 
-Resource and lifecycle telemetry over DDS, so other tools (and other ECUs)
-can subscribe to the manager's view of the system.
+The manager publishes its view of the system - per node the lifecycle state,
+resources, scheduling, timing and arbitration state - on `vrm_node_status`
+every second, and every event on `vrm_system_event`. Any DDS participant on
+the network can subscribe: `vrm_monitor` does, from an unprivileged
+container, and shows it like `top`. The dashboard's JSON file is the same
+information for the browser.

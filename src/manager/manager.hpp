@@ -12,6 +12,7 @@
 
 #include "cpu_tracer.hpp"
 #include "lifecycle_client.hpp"
+#include "telemetry.hpp"
 #include "vrm/arbiter.hpp"
 #include "vrm/cgroup.hpp"
 #include "vrm/manifest.hpp"
@@ -63,6 +64,9 @@ public:
     void set_cpu_tracer(std::unique_ptr<CpuTracer> tracer) { tracer_ = std::move(tracer); }
     void write_status();
 
+    // Publishes every node's status over DDS (topic vrm_node_status).
+    void publish_telemetry();
+
 private:
     struct RunningNode {
         const NodeSpec* spec;
@@ -105,6 +109,7 @@ private:
     void arbitrate();
     void apply(const ArbiterAction& action);
     void demote_to_normal_scheduling(RunningNode& node);
+    msg::NodeStatusReport build_report(RunningNode& node);
     void schedule_restart(RunningNode& node);
 
     bool start_node(RunningNode& node);
@@ -117,6 +122,8 @@ private:
     enum class Level { Info, Warn, Error };
     // Logs a message and keeps it in the recent event list.
     void note(Level level, const std::string& node, const std::string& message);
+    // Keeps an event for the status file and publishes it over DDS.
+    void record_event(Level level, const std::string& node, const std::string& message);
 
     struct Event {
         double time;  // Unix time in seconds.
@@ -137,6 +144,7 @@ private:
     std::vector<RunningNode> nodes_;  // In start order.
     std::deque<Event> events_;
     std::unique_ptr<CpuTracer> tracer_;
+    TelemetryPublisher telemetry_;
     std::string status_path_;
     std::chrono::milliseconds status_interval_{1000};
     bool status_write_failed_ = false;

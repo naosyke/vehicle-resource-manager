@@ -8,6 +8,7 @@
 //   --report-interval SECONDS resource report interval (default 5, 0 = off)
 //   --no-cgroups              do not enforce resource budgets
 //   --require-cgroups         exit with code 3 if budgets cannot be enforced
+//   --no-rt                   ignore priorities (all nodes SCHED_OTHER), for comparisons
 //   --status-file PATH        write a JSON status snapshot for the dashboard
 //   --status-interval SECONDS status snapshot interval (default 1)
 #include <chrono>
@@ -25,6 +26,7 @@ int main(int argc, char** argv) {
     double report_interval_seconds = 5.0;
     bool use_cgroups = true;
     bool require_cgroups = false;
+    bool realtime = true;
     std::string status_file;
     double status_interval_seconds = 1.0;
     for (int i = 1; i < argc; ++i) {
@@ -37,6 +39,8 @@ int main(int argc, char** argv) {
             use_cgroups = false;
         } else if (arg == "--require-cgroups") {
             require_cgroups = true;
+        } else if (arg == "--no-rt") {
+            realtime = false;
         } else if (arg == "--status-file" && i + 1 < argc) {
             status_file = argv[++i];
         } else if (arg == "--status-interval" && i + 1 < argc) {
@@ -44,12 +48,12 @@ int main(int argc, char** argv) {
         } else if (manifest_path.empty() && arg.rfind("--", 0) != 0) {
             manifest_path = arg;
         } else {
-            std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--status-file PATH] [--status-interval S]\n";
+            std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--status-file PATH] [--status-interval S]\n";
             return 2;
         }
     }
     if (manifest_path.empty()) {
-        std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--status-file PATH] [--status-interval S]\n";
+        std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--status-file PATH] [--status-interval S]\n";
         return 2;
     }
 
@@ -77,7 +81,7 @@ int main(int argc, char** argv) {
     }
 
     vrm::install_stop_signal_handlers();
-    vrm::Manager manager(std::move(manifest), std::move(cgroups));
+    vrm::Manager manager(std::move(manifest), std::move(cgroups), realtime);
     if (!status_file.empty()) {
         manager.set_status_file(status_file,
                                 std::chrono::milliseconds(static_cast<long>(status_interval_seconds * 1000)));
@@ -92,6 +96,7 @@ int main(int argc, char** argv) {
     manager.supervise(std::chrono::milliseconds(static_cast<long>(exit_after_seconds * 1000)),
                       std::chrono::milliseconds(static_cast<long>(report_interval_seconds * 1000)));
     manager.print_resources();
+    manager.print_timing();
     manager.stop();
     manager.print_summary();
     return 0;

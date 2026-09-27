@@ -22,6 +22,16 @@ enum class Criticality {
 
 std::string_view to_string(Criticality criticality);
 
+enum class RestartPolicy {
+    Never,
+    OnFailure,  // Restart after an unexpected exit, a crash or a lost heartbeat.
+};
+
+std::string_view to_string(RestartPolicy policy);
+
+// Default: safety- and mission-critical nodes restart, best-effort nodes do not.
+RestartPolicy default_restart_policy(Criticality criticality);
+
 struct ResourceBudget {
     std::optional<double> cpu_cores;        // e.g. 0.5 = half a core (cgroup cpu.max).
     std::optional<std::uint64_t> memory_bytes;  // Hard limit (cgroup memory.max).
@@ -36,11 +46,15 @@ struct NodeSpec {
     int priority = 0;  // 1-99 = real-time (SCHED_FIFO) priority, 0 = normal scheduling.
     ResourceBudget resources;
     std::vector<std::string> depends_on;
+    RestartPolicy restart = RestartPolicy::Never;
+    int max_restarts = 3;
 };
 
 struct SystemManifest {
     std::string name;
     std::chrono::milliseconds transition_timeout{3000};
+    // A node that sends no heartbeat for this long is considered hung.
+    std::chrono::milliseconds heartbeat_timeout{1500};
     std::vector<NodeSpec> nodes;
 
     const NodeSpec* find(std::string_view node_name) const;

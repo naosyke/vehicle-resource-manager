@@ -87,7 +87,7 @@
   .unpinned { margin-top: 10px; font-size: 13px; color: var(--text-secondary); }
 
   /* Nodes */
-  .node { display: grid; grid-template-columns: 210px minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 12px 0; border-top: 1px solid var(--border); }
+  .node { display: grid; grid-template-columns: 200px repeat(3, minmax(0, 1fr)); gap: 16px; padding: 12px 0; border-top: 1px solid var(--border); }
   .node:first-of-type { border-top: 0; padding-top: 0; }
   .node-name { font-weight: 600; }
   .node-meta { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
@@ -114,6 +114,10 @@
 
   .empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
 
+  @media (max-width: 1000px) {
+    .node { grid-template-columns: 200px repeat(2, minmax(0, 1fr)); }
+    .node > .timing { grid-column: 2 / -1; }
+  }
   @media (max-width: 820px) {
     .node { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   }
@@ -134,7 +138,7 @@
   </section>
 
   <section class="card">
-    <h2>Nodes <span class="muted">(usage against budget; charts show the last 60 s, dashed line = limit)</span></h2>
+    <h2>Nodes <span class="muted">(usage against budget and response time against deadline; charts show the last 60 s, dashed line = limit / deadline)</span></h2>
     <div id="nodes"><div class="empty">Waiting for status/status.json…</div></div>
   </section>
 
@@ -157,7 +161,7 @@ const ICONS = {
   critical: '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="2" fill="var(--critical)"/><path d="M4 4l4 4M8 4l-4 4" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>',
 };
 
-const history = {};  // node -> [{t, cpu, mem}] with values as fractions of the budget
+const history = {};  // node -> [{t, cpu, mem, resp}] as fractions of budget / deadline
 let hover = null;    // {key, clientX}: keeps a tooltip open across 1 s redraws
 
 function status(kind, label) {
@@ -168,6 +172,10 @@ function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 }
 
+function formatMs(microseconds) {
+  return `${(microseconds / 1000).toFixed(2)} ms`;
+}
+
 function formatBytes(bytes) {
   const units = ["B", "Ki", "Mi", "Gi"];
   let value = bytes, unit = 0;
@@ -176,6 +184,7 @@ function formatBytes(bytes) {
 }
 
 function nodeStatus(node) {
+  if (node.restart_pending) return status("warning", "restarting…");
   if (node.running && node.state === "active") return status("good", "active");
   if (node.outcome === "exited") return status("critical", node.detail || "exited");
   if (node.outcome === "failed") return status("critical", "failed");
@@ -239,17 +248,32 @@ function renderNodes(data) {
     const memLimit = budget.memory_bytes;
     const memFraction = usage && memLimit ? usage.memory_bytes / memLimit : 0;
     const peakFraction = usage && memLimit ? usage.memory_peak_bytes / memLimit : null;
+    const timing = node.running ? node.timing : null;
+    const respFraction = timing && timing.deadline_us ? timing.max_response_us / timing.deadline_us : null;
 
     if (usage && node.running) {
       const points = history[node.name] || (history[node.name] = []);
       if (!points.length || points[points.length - 1].t !== now) {
-        points.push({t: now, cpu: cpuFraction, mem: memLimit ? memFraction : null,
-                     cpuText: `${usage.cpu_percent.toFixed(1)}%`, memText: formatBytes(usage.memory_bytes)});
+        points.push({t: now, cpu: cpuFraction, mem: memLimit ? memFraction : null, resp: respFraction,
+                     cpuText: `${usage.cpu_percent.toFixed(1)}%`, memText: formatBytes(usage.memory_bytes),
+                     respText: timing ? formatMs(timing.max_response_us) : ""});
       }
       while (points.length && points[0].t < now - HISTORY_SECONDS) points.shift();
     }
 
     const flags = [];
+    const sched = node.sched || {};
+    if (node.running && sched.policy && sched.requested === "SCHED_FIFO" && sched.policy !== "SCHED_FIFO") {
+      flags.push(status("warning", `wanted SCHED_FIFO ${sched.requested_priority}, got ${sched.policy}`));
+    }
+    if (node.running && node.heartbeat_age_ms != null && node.heartbeat_age_ms > 1000) {
+      flags.push(status("warning", `no heartbeat for ${(node.heartbeat_age_ms / 1000).toFixed(1)} s`));
+    }
+    if (timing && timing.total_misses) {
+      flags.push(status(node.criticality === "safety_critical" ? "critical" : "warning",
+                        `${timing.total_misses} deadline misses`));
+    }
+    if (node.restarts) flags.push(status("warning", `restarted ${node.restarts}×`));
     // An OOM exit is already the node's status line.
     if (usage && usage.oom_kills && node.outcome !== "exited") flags.push(status("critical", `OOM killed ×${usage.oom_kills}`));
     if (usage && usage.nr_throttled) flags.push(status("warning", `CPU throttled ${usage.nr_throttled}×`));
@@ -261,13 +285,16 @@ function renderNodes(data) {
     const memValue = usage
       ? `${formatBytes(usage.memory_bytes)} / ${memLimit ? formatBytes(memLimit) : "no limit"} · peak ${formatBytes(usage.memory_peak_bytes)}`
       : "not measured";
-    const pinnedText = budget.cpus.length ? `CPU ${budget.cpus.join(", ")}` : "any CPU";
-    const priorityText = node.priority ? `priority ${node.priority}` : "normal priority";
+    const pinnedText = (budget.cpus.length ? `CPU ${budget.cpus.join(", ")}` : "any CPU") +
+      (timing ? ` · every ${formatMs(timing.period_us).replace(".00", "")}` : "");
+    const schedText = sched.policy
+      ? (sched.priority ? `${sched.policy} ${sched.priority}` : sched.policy)
+      : (node.priority ? `priority ${node.priority}` : "normal priority");
 
     row.innerHTML = `
       <div>
         <div class="node-name">${escapeHtml(node.name)}</div>
-        <div class="node-meta">${escapeHtml(node.criticality.replace("_", " "))} · ${priorityText} · ${pinnedText}</div>
+        <div class="node-meta">${escapeHtml(node.criticality.replace("_", " "))} · ${escapeHtml(schedText)} · ${pinnedText}</div>
         <div class="node-flags">${nodeStatus(node)}${flags.join("")}</div>
       </div>
       <div>
@@ -277,12 +304,23 @@ function renderNodes(data) {
       <div>
         ${metric("Memory", memValue, memFraction, peakFraction, node.running && memLimit && memFraction >= NEAR_LIMIT)}
         <div class="spark" data-kind="mem"><svg role="img" aria-label="Memory over time"></svg><div class="tooltip"></div></div>
+      </div>
+      <div class="timing">
+        ${timing && timing.deadline_us
+          ? metric("Response (max)", `${formatMs(timing.max_response_us)} / ${formatMs(timing.deadline_us)}`,
+                   respFraction, null, respFraction > 1)
+          : `<div class="metric-head"><span class="label">Response (max)</span><span class="value muted">${
+              timing ? `${formatMs(timing.max_response_us)} · no deadline` : node.running ? "waiting for heartbeat" : "not running"}</span></div>`}
+        <div class="spark" data-kind="resp"><svg role="img" aria-label="Response time over time"></svg><div class="tooltip"></div></div>
       </div>`;
     container.append(row);
 
     const points = history[node.name] || [];
     drawSpark(row.querySelector('[data-kind="cpu"]'), `${node.name}/cpu`, points, "cpu", "cpuText", now);
     if (memLimit) drawSpark(row.querySelector('[data-kind="mem"]'), `${node.name}/mem`, points, "mem", "memText", now);
+    if (timing && timing.deadline_us) {
+      drawSpark(row.querySelector('[data-kind="resp"]'), `${node.name}/resp`, points, "resp", "respText", now, "deadline");
+    }
   }
 }
 
@@ -294,7 +332,7 @@ function el(name, attrs, parent) {
 }
 
 // Sparkline of a budget fraction; 1.0 (the limit) is the dashed line.
-function drawSpark(container, hoverKey, points, key, textKey, now) {
+function drawSpark(container, hoverKey, points, key, textKey, now, limitLabel = "limit") {
   const svg = container.querySelector("svg");
   const width = svg.clientWidth, height = svg.clientHeight;
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -307,7 +345,7 @@ function drawSpark(container, hoverKey, points, key, textKey, now) {
 
   el("line", {x1: 0, x2: width, y1: height - 0.5, y2: height - 0.5, stroke: "var(--axis)"}, svg);
   el("line", {x1: 0, x2: width, y1: sy(1), y2: sy(1), stroke: "var(--text-muted)", "stroke-dasharray": "3 3"}, svg);
-  el("text", {x: width, y: sy(1) - 3, "text-anchor": "end", class: "axis-text"}, svg).textContent = "limit";
+  el("text", {x: width, y: sy(1) - 3, "text-anchor": "end", class: "axis-text"}, svg).textContent = limitLabel;
 
   const valid = points.filter((p) => p[key] != null);
   if (valid.length > 1) {
@@ -327,7 +365,7 @@ function drawSpark(container, hoverKey, points, key, textKey, now) {
     marker.setAttribute("cx", sx(p.t));
     marker.setAttribute("cy", sy(p[key]));
     marker.setAttribute("visibility", "visible");
-    tooltip.innerHTML = `<b>${escapeHtml(p[textKey])}</b> <span class="muted">${(p[key] * 100).toFixed(0)}% of limit · ${(now - p.t).toFixed(0)} s ago</span>`;
+    tooltip.innerHTML = `<b>${escapeHtml(p[textKey])}</b> <span class="muted">${(p[key] * 100).toFixed(0)}% of ${limitLabel} · ${(now - p.t).toFixed(0)} s ago</span>`;
     tooltip.style.display = "block";
     tooltip.style.left = `${Math.max(0, Math.min(sx(p.t) + 10, width - tooltip.offsetWidth))}px`;
     tooltip.style.top = `${Math.max(-8, sy(p[key]) - 34)}px`;

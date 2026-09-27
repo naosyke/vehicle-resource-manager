@@ -108,3 +108,29 @@ nodes:
 
     EXPECT_THROW(vrm::startup_order(manifest), ManifestError);
 }
+
+TEST(Manifest, RestartPolicyDefaultsFollowCriticality) {
+    const auto manifest = parse_manifest(R"(
+heartbeat_timeout_ms: 800
+nodes:
+  - {name: brake, executable: x, criticality: safety_critical}
+  - {name: camera, executable: x, criticality: mission_critical}
+  - {name: radio, executable: x, criticality: best_effort}
+  - {name: map, executable: x, criticality: best_effort, restart: on-failure, max_restarts: 5}
+  - {name: lidar, executable: x, criticality: mission_critical, restart: never}
+)");
+
+    EXPECT_EQ(manifest.heartbeat_timeout.count(), 800);
+    EXPECT_EQ(manifest.nodes[0].restart, vrm::RestartPolicy::OnFailure);
+    EXPECT_EQ(manifest.nodes[1].restart, vrm::RestartPolicy::OnFailure);
+    EXPECT_EQ(manifest.nodes[2].restart, vrm::RestartPolicy::Never);
+    EXPECT_EQ(manifest.nodes[3].restart, vrm::RestartPolicy::OnFailure);
+    EXPECT_EQ(manifest.nodes[3].max_restarts, 5);
+    EXPECT_EQ(manifest.nodes[4].restart, vrm::RestartPolicy::Never);
+    EXPECT_EQ(manifest.nodes[0].max_restarts, 3);
+}
+
+TEST(Manifest, RejectsInvalidRestartSettings) {
+    EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, restart: always}]"), ManifestError);
+    EXPECT_THROW(parse_manifest("nodes: [{name: a, executable: x, max_restarts: -1}]"), ManifestError);
+}

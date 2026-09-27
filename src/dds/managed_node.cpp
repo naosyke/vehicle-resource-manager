@@ -1,6 +1,9 @@
 #include "vrm/managed_node.hpp"
 
+#include <sched.h>
 #include <unistd.h>
+
+#include <algorithm>
 
 #include <csignal>
 #include <cstdlib>
@@ -35,11 +38,16 @@ struct ManagedNode::Dds {
         subscriber, command_topic, dds_lifecycle::command_reader_qos(subscriber)};
     dds::pub::DataWriter<msg::LifecycleStatus> status_writer{
         publisher, status_topic, dds_lifecycle::status_writer_qos(publisher)};
+    dds::topic::Topic<msg::NodeHeartbeat> heartbeat_topic{participant, dds_lifecycle::kHeartbeatTopic};
+    dds::pub::DataWriter<msg::NodeHeartbeat> heartbeat_writer{
+        publisher, heartbeat_topic, dds_lifecycle::heartbeat_writer_qos(publisher)};
 };
 
-ManagedNode::ManagedNode(std::string name, std::chrono::milliseconds tick_period)
+ManagedNode::ManagedNode(std::string name, std::chrono::microseconds tick_period,
+                         std::chrono::microseconds deadline)
     : name_(std::move(name)),
       tick_period_(tick_period),
+      monitor_(deadline.count() > 0 ? deadline : deadline.count() < 0 ? std::chrono::microseconds{0} : tick_period),
       machine_(LifecycleCallbacks{
           [this] { return on_configure(); },
           [this] { return on_cleanup(); },
@@ -96,11 +104,62 @@ void ManagedNode::shutdown_gracefully() {
     }
 }
 
+void ManagedNode::publish_heartbeat() {
+    const int policy = sched_getscheduler(0);
+    sched_param param{};
+    sched_getparam(0, &param);
+    const char* policy_name = policy == SCHED_FIFO ? "SCHED_FIFO"
+                              : policy == SCHED_RR ? "SCHED_RR"
+                                                   : "SCHED_OTHER";
+
+    const auto window = monitor_.take_window();
+    msg::NodeHeartbeat heartbeat;
+    heartbeat.manager_id(manager_id_);
+    heartbeat.node(name_);
+    heartbeat.pid(static_cast<int32_t>(getpid()));
+    heartbeat.counter(++heartbeat_sequence_);
+    heartbeat.state(dds_lifecycle::to_msg(machine_.state()));
+    heartbeat.sched_policy(policy_name);
+    heartbeat.sched_priority(param.sched_priority);
+    heartbeat.period_us(static_cast<uint32_t>(tick_period_.count()));
+    heartbeat.deadline_us(static_cast<uint32_t>(monitor_.deadline().count()));
+    heartbeat.total_ticks(monitor_.total_ticks());
+    heartbeat.total_misses(monitor_.total_misses());
+    heartbeat.window_ticks(static_cast<uint32_t>(window.ticks));
+    heartbeat.window_misses(static_cast<uint32_t>(window.misses));
+    heartbeat.window_max_latency_us(static_cast<uint32_t>(window.max_latency.count()));
+    heartbeat.window_max_response_us(static_cast<uint32_t>(window.max_response.count()));
+    heartbeat.window_avg_response_us(static_cast<uint32_t>(window.average_response().count()));
+    dds_->heartbeat_writer.write(heartbeat);
+}
+
+void ManagedNode::run_tick(std::chrono::steady_clock::time_point& next_tick) {
+    const auto release = next_tick;
+    const auto start = std::chrono::steady_clock::now();
+    on_tick();
+    const auto end = std::chrono::steady_clock::now();
+    monitor_.record(release, start, end);
+
+    // The next release is run even if late (its latency shows the delay);
+    // releases more than a full period behind are skipped and counted as misses.
+    next_tick += tick_period_;
+    std::uint64_t skipped = 0;
+    while (next_tick + tick_period_ <= end) {
+        next_tick += tick_period_;
+        ++skipped;
+    }
+    if (skipped) monitor_.record_skipped(skipped);
+}
+
 int ManagedNode::run() {
+    using Clock = std::chrono::steady_clock;
     publish_status(machine_.state(), 0, true, "started");
     log::info(name_, "started (pid " + std::to_string(getpid()) + "), waiting for commands");
 
-    auto next_tick = std::chrono::steady_clock::now();
+    auto next_tick = Clock::now();
+    auto next_heartbeat = Clock::now();
+    bool was_active = false;
+
     while (machine_.state() != State::Finalized) {
         if (g_stop_requested) {
             log::info(name_, "stop signal received");
@@ -119,17 +178,28 @@ int ManagedNode::run() {
             handle_command(sample.data().request_id(), dds_lifecycle::from_msg(sample.data().transition()));
         }
 
-        const auto now = std::chrono::steady_clock::now();
-        if (machine_.state() == State::Active && now >= next_tick) {
-            on_tick();
-            next_tick += tick_period_;
-            if (next_tick < now) {
-                next_tick = now + tick_period_;  // Skip missed ticks instead of bursting.
-            }
+        const bool active = machine_.state() == State::Active;
+        if (active && !was_active) {
+            next_tick = Clock::now();  // First release right after activation.
+            monitor_.reset();
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+        was_active = active;
+        if (active && Clock::now() >= next_tick) {
+            run_tick(next_tick);
+        }
 
+        const auto now = Clock::now();
+        if (now >= next_heartbeat) {
+            publish_heartbeat();
+            next_heartbeat += dds_lifecycle::kHeartbeatInterval;
+            if (next_heartbeat < now) next_heartbeat = now + dds_lifecycle::kHeartbeatInterval;
+        }
+
+        // Sleep until the next release or heartbeat, but poll commands at least every 2 ms.
+        auto wake = std::min(now + std::chrono::milliseconds(2), next_heartbeat);
+        if (active) wake = std::min(wake, next_tick);
+        std::this_thread::sleep_until(wake);
+    }
     log::info(name_, "finalized");
     // Give the transient-local status a moment to reach the manager.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));

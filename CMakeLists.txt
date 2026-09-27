@@ -18,6 +18,7 @@ add_library(vrm_core
   src/core/manifest.cpp
   src/core/log.cpp
   src/core/cgroup.cpp
+  src/core/deadline_monitor.cpp
 )
 target_include_directories(vrm_core PUBLIC include)
 target_link_libraries(vrm_core PUBLIC yaml-cpp)
@@ -55,6 +56,7 @@ add_executable(vrm_unit_tests
   tests/test_lifecycle.cpp
   tests/test_manifest.cpp
   tests/test_cgroup_helpers.cpp
+  tests/test_deadline_monitor.cpp
 )
 target_link_libraries(vrm_unit_tests PRIVATE vrm_core GTest::gtest_main)
 include(GoogleTest)
@@ -80,6 +82,29 @@ add_test(NAME two_systems_do_not_interfere
     && $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_system.yaml --exit-after 3 --no-cgroups \
     --status-file two_systems.json > /dev/null \
     && ! grep -q '\"outcome\":\"exited\"' two_systems.json")
+
+# A crashing node is restarted with backoff until its restart limit.
+add_test(NAME crashed_node_is_restarted
+  COMMAND sh -c "$<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_restart.yaml --exit-after 4 \
+    --report-interval 0 --status-file restart.json > /dev/null \
+    && grep -q '\"name\":\"brake_control\",.*\"restarts\":2' restart.json \
+    && grep -q 'reached its restart limit' restart.json")
+
+# A hung node is detected by its missing heartbeat, killed and restarted.
+add_test(NAME hung_node_is_detected_and_restarted
+  COMMAND sh -c "$<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/test_hang.yaml --exit-after 3 \
+    --report-interval 0 --status-file hang.json > /dev/null \
+    && grep -q 'heartbeat lost' hang.json \
+    && grep -q '\"restarts\":1' hang.json")
+
+# Real-time priority is applied (needs CAP_SYS_NICE, e.g. --privileged; skipped otherwise).
+add_test(NAME realtime_priority_is_applied
+  COMMAND sh -c "chrt -f 1 true 2>/dev/null || exit 77; \
+    $<TARGET_FILE:vrm_manager> ${CMAKE_SOURCE_DIR}/config/demo_cpu_contention.yaml --exit-after 2 \
+    --report-interval 0 --status-file realtime.json > /dev/null & \
+    sleep 1.5 && grep -q '\"name\":\"brake_control\",.*\"policy\":\"SCHED_FIFO\",\"priority\":80' realtime.json; \
+    status=$?; wait; exit $status")
+set_tests_properties(realtime_priority_is_applied PROPERTIES SKIP_RETURN_CODE 77)
 
 # The status file for the dashboard is valid JSON with the final node states.
 add_test(NAME status_file_for_dashboard

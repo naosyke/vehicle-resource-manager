@@ -22,6 +22,23 @@ struct NodeStatus {
     int pid = 0;
 };
 
+// Latest heartbeat of a node (see NodeHeartbeat in the IDL).
+struct Heartbeat {
+    std::chrono::steady_clock::time_point received_at;
+    int pid = 0;
+    std::uint64_t counter = 0;
+    std::string sched_policy;
+    int sched_priority = 0;
+    std::uint32_t period_us = 0;
+    std::uint32_t deadline_us = 0;
+    std::uint64_t total_ticks = 0;
+    std::uint64_t total_misses = 0;
+    std::uint32_t window_misses = 0;
+    std::uint32_t window_max_latency_us = 0;
+    std::uint32_t window_max_response_us = 0;
+    std::uint32_t window_avg_response_us = 0;
+};
+
 struct RequestResult {
     bool success;
     std::optional<State> state;  // Empty when the node never answered.
@@ -46,6 +63,7 @@ public:
     void poll();
 
     std::optional<NodeStatus> status(const std::string& node) const;
+    std::optional<Heartbeat> heartbeat(const std::string& node) const;
 
     // Waits until `node` (running as `pid`) reports `state`.
     // `alive` is checked while waiting so a crashed node fails fast.
@@ -62,6 +80,7 @@ private:
     struct Dds;
     std::unique_ptr<Dds> dds_;
     std::map<std::string, NodeStatus> latest_;
+    std::map<std::string, Heartbeat> heartbeats_;
     StateListener listener_;
     std::uint64_t manager_id_;
     std::uint32_t next_request_id_ = 1;

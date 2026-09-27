@@ -36,7 +36,8 @@ flowchart LR
 | Manifest | `src/core/manifest.cpp` | YAML parsing, validation, startup order |
 | `ManagedNode` | `src/dds/managed_node.cpp` | Node side: receives commands, runs the state machine, publishes status |
 | `LifecycleClient` | `src/manager/lifecycle_client.cpp` | Manager side: sends commands, tracks node status |
-| `Manager` | `src/manager/manager.cpp` | Startup, supervision, degradation rules, shutdown |
+| `Manager` | `src/manager/manager.cpp` | Startup, supervision (heartbeat, deadlines, restarts), degradation rules, shutdown |
+| `DeadlineMonitor` | `src/core/deadline_monitor.cpp` | Latency, response time and deadline misses of periodic work |
 
 ## 2. Node Lifecycle
 
@@ -89,6 +90,7 @@ its own DDS instance.
 |---|---|---|---|---|
 | `vrm_lifecycle_command` | `LifecycleCommand` | manager → node | Reliable, Volatile, KeepLast 16 | Commands must not be lost, but are meaningless to a node that starts later |
 | `vrm_lifecycle_status` | `LifecycleStatus` | node → manager | Reliable, TransientLocal, KeepLast 1 (writer) | A manager that (re)starts late still gets each node's current state |
+| `vrm_node_heartbeat` | `NodeHeartbeat` | node → manager | BestEffort, Volatile, KeepLast 1 | Periodic; a lost sample is replaced by the next one, and missing several means the node hangs |
 
 ```mermaid
 sequenceDiagram
@@ -208,8 +210,85 @@ browser.
 vrm_manager ──(write + rename every 1 s)──▶ status/status.json ◀──(fetch every 1 s)── dashboard/index.html
 ```
 
-## 7. Planned
+## 7. Real-time Scheduling and Supervision
 
-Phase 3 adds SCHED_FIFO priorities and heartbeat / deadline monitoring;
-phase 4 adds pressure-based arbitration (PSI), so that lower-criticality nodes
-are throttled or stopped before they can interfere with safety-critical ones.
+### Scheduling
+
+A node with `priority: 1-99` runs as `SCHED_FIFO` with that priority. The
+child sets it with `sched_setscheduler()` between `fork()` and `exec()`
+(after joining its cgroup), so the policy applies from the first instruction
+and is inherited by the node's DDS threads. A `SCHED_FIFO` task runs as soon
+as it is ready and is only preempted by higher real-time priorities, so
+normal (`SCHED_OTHER`) tasks on the same CPU cannot delay it.
+
+The node reports the policy the kernel actually applied in its heartbeat;
+the manager warns when it differs from the manifest (e.g. no `CAP_SYS_NICE`).
+
+**`cpu.max` does not limit `SCHED_FIFO` tasks.** cgroup v2 CPU bandwidth
+control applies to normal tasks only; a runaway real-time task is limited
+only by the kernel's global real-time throttling
+(`sched_rt_runtime_us` = 95 % per second). The manager therefore only
+*monitors* the CPU budget of real-time nodes and warns when it is exceeded.
+Acting on it (e.g. demoting the node) is part of phase 4.
+
+**Environment limits.** Docker Desktop runs Linux in a virtual machine
+without a `PREEMPT_RT` kernel. `cyclictest` measures kernel wake-up latencies
+of up to ~54 ms there, so a few deadline misses remain even with
+`SCHED_FIFO` and no competing load. On a real ECU one would use a
+`PREEMPT_RT` kernel, isolated CPUs (`isolcpus`, `nohz_full`) and
+`cpuset.cpus.partition = isolated` for safety-critical nodes.
+
+### Deadline monitoring
+
+Each activation (tick) of a node's periodic work is measured against its
+release time (when it was due):
+
+| Measure | Definition |
+|---|---|
+| Latency | start − release |
+| Response time | end − release |
+| Deadline miss | response time > deadline, or a release skipped because the previous tick overran by more than a period |
+
+Nodes without a deadline (`--no-deadline`, batch work) are measured but never
+count misses.
+
+### Heartbeat and alive supervision
+
+Every node publishes a `NodeHeartbeat` every 500 ms from process start:
+state, scheduling policy, and the timing statistics since the previous
+heartbeat. QoS is best effort / volatile / keep last 1: a lost heartbeat is
+simply replaced by the next one.
+
+```mermaid
+sequenceDiagram
+    participant N as node
+    participant M as vrm_manager
+
+    loop every 500 ms
+        N-->>M: NodeHeartbeat (policy, max response, misses, ...)
+    end
+    Note over N: node hangs (endless loop)
+    Note over M: no heartbeat for heartbeat_timeout_ms (1.5 s)
+    M->>N: SIGKILL
+    Note over M: restart policy on-failure: restart after 250 ms
+    M->>N: fork / exec, configure, activate
+```
+
+### Restart policy
+
+| Criticality | Default `restart` |
+|---|---|
+| safety_critical, mission_critical | `on-failure` |
+| best_effort | `never` |
+
+A node that exits unexpectedly, crashes or loses its heartbeat is restarted
+after 250 ms, 500 ms, 1 s, 2 s, then 4 s, up to `max_restarts` (default 3).
+When a safety-critical node reaches its limit, the manager reports the system
+as degraded.
+
+## 8. Planned
+
+Phase 4 adds pressure-based arbitration (PSI) and acting on budget overruns
+(including demoting real-time nodes that exceed their CPU budget), so that
+lower-criticality nodes are throttled or stopped before they can interfere
+with safety-critical ones.

@@ -29,9 +29,11 @@ std::string_view to_string(NodeOutcome outcome);
 
 class Manager {
 public:
-    // Without a CgroupManager, resource budgets are not enforced.
-    // `manager_id` identifies this run (random when 0).
-    Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, std::uint64_t manager_id = 0);
+    // Without a CgroupManager, resource budgets are not enforced. With
+    // `realtime` false, nodes run with normal scheduling regardless of their
+    // priority (for comparisons). `manager_id` identifies this run (random when 0).
+    Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, bool realtime = true,
+            std::uint64_t manager_id = 0);
     ~Manager();
 
     // Returns false when a safety-critical node could not be started.
@@ -47,6 +49,7 @@ public:
 
     void print_summary() const;
     void print_resources();
+    void print_timing();
 
     // Writes a JSON snapshot of nodes, budgets, usage and recent events to
     // `path` every `interval` while supervising (for the dashboard).
@@ -65,7 +68,24 @@ private:
         CgroupUsage usage;  // Latest sample.
         std::chrono::steady_clock::time_point sampled_at;
         double cpu_percent = 0.0;  // 100% = one core, over the last sample interval.
+
+        // Supervision
+        std::chrono::steady_clock::time_point spawned_at;
+        std::string kill_reason;             // Set when the manager kills the node.
+        int restarts = 0;
+        bool restart_pending = false;
+        std::chrono::steady_clock::time_point restart_at;
+        bool scheduling_checked = false;
+        std::uint64_t seen_heartbeat = 0;    // Last heartbeat counter processed.
+        std::uint64_t unreported_misses = 0;
+        std::uint32_t unreported_max_response_us = 0;  // Worst response since the last report.
+        std::chrono::steady_clock::time_point misses_reported_at;
+        std::chrono::steady_clock::time_point rt_overrun_reported_at;
     };
+
+    int rt_priority(const NodeSpec& spec) const { return realtime_ ? spec.priority : 0; }
+    void supervise_node(RunningNode& node);
+    void schedule_restart(RunningNode& node);
 
     bool start_node(RunningNode& node);
     void fail_node(RunningNode& node, const std::string& reason);
@@ -88,6 +108,8 @@ private:
 
     SystemManifest manifest_;
     std::unique_ptr<CgroupManager> cgroups_;
+    bool realtime_;
+    bool stopping_ = false;
     LifecycleClient client_;
     std::vector<RunningNode> nodes_;  // In start order.
     std::deque<Event> events_;

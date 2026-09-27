@@ -19,6 +19,14 @@ std::string_view to_string(Criticality criticality) {
     return "unknown";
 }
 
+std::string_view to_string(RestartPolicy policy) {
+    return policy == RestartPolicy::OnFailure ? "on-failure" : "never";
+}
+
+RestartPolicy default_restart_policy(Criticality criticality) {
+    return criticality == Criticality::BestEffort ? RestartPolicy::Never : RestartPolicy::OnFailure;
+}
+
 const NodeSpec* SystemManifest::find(std::string_view node_name) const {
     for (const auto& node : nodes) {
         if (node.name == node_name) {
@@ -66,6 +74,23 @@ NodeSpec parse_node(const YAML::Node& yaml) {
 
     if (yaml["criticality"]) {
         node.criticality = parse_criticality(yaml["criticality"].as<std::string>(), node.name);
+    }
+    node.restart = default_restart_policy(node.criticality);
+    if (yaml["restart"]) {
+        const auto policy = yaml["restart"].as<std::string>();
+        if (policy == "never") {
+            node.restart = RestartPolicy::Never;
+        } else if (policy == "on-failure") {
+            node.restart = RestartPolicy::OnFailure;
+        } else {
+            throw ManifestError("node '" + node.name + "': restart must be 'never' or 'on-failure'");
+        }
+    }
+    if (yaml["max_restarts"]) {
+        node.max_restarts = yaml["max_restarts"].as<int>();
+        if (node.max_restarts < 0) {
+            throw ManifestError("node '" + node.name + "': max_restarts must not be negative");
+        }
     }
     if (yaml["priority"]) {
         node.priority = yaml["priority"].as<int>();
@@ -153,6 +178,9 @@ SystemManifest parse_manifest(const std::string& yaml_text) {
         if (root["transition_timeout_ms"]) {
             manifest.transition_timeout =
                 std::chrono::milliseconds(root["transition_timeout_ms"].as<int>());
+        }
+        if (root["heartbeat_timeout_ms"]) {
+            manifest.heartbeat_timeout = std::chrono::milliseconds(root["heartbeat_timeout_ms"].as<int>());
         }
         if (!root["nodes"] || !root["nodes"].IsSequence()) {
             throw ManifestError("'nodes' must be a list");

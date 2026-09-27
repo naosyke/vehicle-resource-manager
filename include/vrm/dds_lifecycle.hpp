@@ -2,6 +2,8 @@
 // and conversions between the IDL enums and vrm::State / vrm::Transition.
 #pragma once
 
+#include <chrono>
+
 #include <dds/dds.hpp>
 
 #include "LifecycleMsgs.hpp"
@@ -11,6 +13,8 @@ namespace vrm::dds_lifecycle {
 
 inline constexpr const char* kCommandTopic = "vrm_lifecycle_command";
 inline constexpr const char* kStatusTopic = "vrm_lifecycle_status";
+inline constexpr const char* kHeartbeatTopic = "vrm_node_heartbeat";
+inline constexpr auto kHeartbeatInterval = std::chrono::milliseconds(500);
 
 // Environment variable through which the manager passes its id to nodes.
 inline constexpr const char* kManagerIdEnv = "VRM_MANAGER_ID";
@@ -27,5 +31,9 @@ dds::sub::qos::DataReaderQos command_reader_qos(const dds::sub::Subscriber& subs
 // Status keeps the latest sample per node for late joiners.
 dds::pub::qos::DataWriterQos status_writer_qos(const dds::pub::Publisher& publisher);
 dds::sub::qos::DataReaderQos status_reader_qos(const dds::sub::Subscriber& subscriber);
+
+// Heartbeats are periodic; a lost sample is replaced by the next one.
+dds::pub::qos::DataWriterQos heartbeat_writer_qos(const dds::pub::Publisher& publisher);
+dds::sub::qos::DataReaderQos heartbeat_reader_qos(const dds::sub::Subscriber& subscriber);
 
 }  // namespace vrm::dds_lifecycle

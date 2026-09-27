@@ -1,0 +1,13 @@
+# Test: a crashing safety-critical node is restarted with backoff until its
+# restart limit, then the system is reported as degraded.
+system: test_restart
+transition_timeout_ms: 3000
+nodes:
+  - name: brake_control
+    executable: vrm_demo_node
+    args: ["--period-ms", "10", "--work-ms", "1", "--crash-after-sec", "0.3"]
+    criticality: safety_critical
+    max_restarts: 2
+  - name: infotainment
+    executable: vrm_demo_node
+    criticality: best_effort

@@ -63,6 +63,8 @@ function such as infotainment misbehaves.
   nodes are demoted
 * **Live dashboard**: CPU core map, usage against budget, response time
   against deadline, arbitration state and events in the browser
+* **CPU timeline**: which node runs on which CPU, from the kernel's
+  `sched_switch` trace events, down to a 100 ms window
 
 ## Requirements
 
@@ -113,6 +115,8 @@ Press Ctrl-C to shut the system down in order.
 | `--no-arbitration` | Never throttle, deactivate or stop nodes to protect others |
 | `--equal-weights` | `cpu.weight` 100 for every node instead of by criticality |
 | `--status-file PATH` | Write a JSON status snapshot for the dashboard |
+| `--status-interval SECONDS` | Status snapshot interval (default 1) |
+| `--trace-cpus LIST` | Add a timeline of which node runs on these CPUs (e.g. `0,1`), from ftrace |
 
 ```text
 17:40:36.450 INFO  [manager] spawned brake_control (pid 31, safety_critical)
@@ -190,6 +194,25 @@ in one go and finishes in 28 ms. The best-effort nodes meet their looser
 deadlines in the gaps either way. (Results vary between runs in the Docker
 Desktop VM: in a run with many VM stalls brake_control, which cannot be
 delayed by the other nodes, missed 24 deadlines and the others a few.)
+
+### Demo: watching the scheduler on two CPUs
+
+[`config/demo_two_cores.yaml`](config/demo_two_cores.yaml) pins brake_control
+to CPU 1 and lets perception and two CPU hogs run on CPU 0 or 1. With
+`--trace-cpus` the manager records the kernel's `sched_switch` events (ftrace)
+for those CPUs and the dashboard shows which node ran when:
+
+```bash
+docker run --rm -it --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/demo_two_cores.yaml --trace-cpus 0,1 \
+  --status-file status/status.json --status-interval 0.25 --report-interval 0
+```
+
+At 200 ms zoom the timeline shows brake_control preempting whatever runs on
+CPU 1 for 2 ms every 10 ms, perception running in 20 ms bursts every 50 ms,
+and the hogs filling the gaps. Nodes name their main thread after
+themselves (`prctl(PR_SET_NAME)`), so the trace can tell them apart; DDS
+helper threads and system tasks appear as "other".
 
 ### Demo: protecting a mission-critical node without stopping anyone
 

@@ -212,6 +212,20 @@ browser.
 vrm_manager ──(write + rename every 1 s)──▶ status/status.json ◀──(fetch every 1 s)── dashboard/index.html
 ```
 
+**CPU timeline.** With `--trace-cpus 0,1` the manager enables the kernel's
+`sched_switch` trace event (ftrace, `/sys/kernel/tracing`) for those CPUs,
+with the `mono` trace clock, and reads `trace_pipe` in a background thread.
+Every event closes the running segment of that CPU and opens the next one,
+so it keeps an exact record of which thread ran when for the last 2 s. Nodes
+name their main thread after themselves (`prctl(PR_SET_NAME)`, 15
+characters), which maps thread names back to nodes; everything else is
+"other". The status file carries the segments relative to now, and the
+dashboard polls every 250 ms and draws them per CPU with a 100 ms - 2 s zoom.
+Each manager uses its own ftrace instance
+(`/sys/kernel/tracing/instances/vrm-<random>`) with a private buffer, event
+switches and `trace_pipe`, so several managers (or other tools using the
+global trace) can trace at the same time; the instance is removed on exit.
+
 ## 7. Real-time Scheduling and Supervision
 
 ### Scheduling

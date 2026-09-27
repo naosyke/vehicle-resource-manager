@@ -9,6 +9,7 @@
 #include <sched.h>
 
 #include <filesystem>
+#include <map>
 #include <random>
 #include <sstream>
 #include <thread>
@@ -616,7 +617,38 @@ void Manager::write_status() {
         }
         json << "}";
     }
-    json << "],\"events\":[";
+    json << "]";
+
+    if (tracer_) {
+        // Thread names are cut to 15 characters by the kernel.
+        std::map<std::string, std::string> node_by_comm;
+        for (const auto& node : nodes_) node_by_comm[node.spec->name.substr(0, 15)] = node.spec->name;
+        const double now = CpuTracer::monotonic_now();
+        json << ",\"cpu_timeline\":{\"window_ms\":2000,\"cpus\":[";
+        bool first_cpu = true;
+        for (const auto& [cpu, segments] : tracer_->timeline(now)) {
+            json << (first_cpu ? "" : ",") << "{\"cpu\":" << cpu << ",\"segments\":[";
+            first_cpu = false;
+            bool first = true;
+            for (const auto& segment : segments) {
+                const double start = std::max(-2000.0, (segment.start - now) * 1000.0);
+                const double end = (segment.end - now) * 1000.0;
+                if (end < -2000.0 || end - start < 0.01) continue;
+                const auto node = node_by_comm.find(segment.comm);
+                const std::string who = segment.comm.empty()           ? "idle"
+                                        : node != node_by_comm.end() ? node->second
+                                                                     : "other";
+                char times[64];
+                std::snprintf(times, sizeof(times), "[%.2f,%.2f,", start, end);
+                json << (first ? "" : ",") << times << json_string(who) << "]";
+                first = false;
+            }
+            json << "]}";
+        }
+        json << "]}";
+    }
+
+    json << ",\"events\":[";
     for (std::size_t i = 0; i < events_.size(); ++i) {
         const auto& event = events_[i];
         json << (i ? "," : "") << "{\"time\":" << event.time

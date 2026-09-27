@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "cpu_tracer.hpp"
 #include "lifecycle_client.hpp"
 #include "vrm/arbiter.hpp"
 #include "vrm/cgroup.hpp"
@@ -57,6 +58,9 @@ public:
     // Writes a JSON snapshot of nodes, budgets, usage and recent events to
     // `path` every `interval` while supervising (for the dashboard).
     void set_status_file(std::string path, std::chrono::milliseconds interval);
+
+    // Adds a per-CPU timeline of which node runs where to the status file.
+    void set_cpu_tracer(std::unique_ptr<CpuTracer> tracer) { tracer_ = std::move(tracer); }
     void write_status();
 
 private:
@@ -132,6 +136,7 @@ private:
     LifecycleClient client_;
     std::vector<RunningNode> nodes_;  // In start order.
     std::deque<Event> events_;
+    std::unique_ptr<CpuTracer> tracer_;
     std::string status_path_;
     std::chrono::milliseconds status_interval_{1000};
     bool status_write_failed_ = false;

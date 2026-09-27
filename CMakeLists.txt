@@ -41,6 +41,7 @@ add_executable(vrm_manager
   src/manager/manager.cpp
   src/manager/lifecycle_client.cpp
   src/manager/process.cpp
+  src/manager/cpu_tracer.cpp
 )
 target_link_libraries(vrm_manager PRIVATE vrm_dds)
 target_compile_options(vrm_manager PRIVATE -Wall -Wextra)
@@ -59,9 +60,12 @@ add_executable(vrm_unit_tests
   tests/test_cgroup_helpers.cpp
   tests/test_deadline_monitor.cpp
   tests/test_arbiter.cpp
+  tests/test_cpu_tracer.cpp
+  src/manager/cpu_tracer.cpp
 )
 target_link_libraries(vrm_unit_tests PRIVATE vrm_core GTest::gtest_main)
 target_compile_definitions(vrm_unit_tests PRIVATE VRM_CONFIG_DIR="${CMAKE_SOURCE_DIR}/config")
+target_include_directories(vrm_unit_tests PRIVATE src/manager)
 include(GoogleTest)
 gtest_discover_tests(vrm_unit_tests)
 

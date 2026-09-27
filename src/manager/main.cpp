@@ -13,6 +13,8 @@
 //   --equal-weights           cpu.weight 100 for every node instead of by criticality
 //   --status-file PATH        write a JSON status snapshot for the dashboard
 //   --status-interval SECONDS status snapshot interval (default 1)
+//   --trace-cpus LIST         add a timeline of which node runs on these CPUs (e.g. 0,1)
+//                             to the status file (ftrace; needs --privileged)
 #include <chrono>
 #include <iostream>
 #include <string>
@@ -33,6 +35,7 @@ int main(int argc, char** argv) {
     bool criticality_weights = true;
     std::string status_file;
     double status_interval_seconds = 1.0;
+    std::string trace_cpus;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--exit-after" && i + 1 < argc) {
@@ -51,17 +54,19 @@ int main(int argc, char** argv) {
             criticality_weights = false;
         } else if (arg == "--status-file" && i + 1 < argc) {
             status_file = argv[++i];
+        } else if (arg == "--trace-cpus" && i + 1 < argc) {
+            trace_cpus = argv[++i];
         } else if (arg == "--status-interval" && i + 1 < argc) {
             status_interval_seconds = std::stod(argv[++i]);
         } else if (manifest_path.empty() && arg.rfind("--", 0) != 0) {
             manifest_path = arg;
         } else {
-            std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--no-arbitration] [--equal-weights] [--status-file PATH] [--status-interval S]\n";
+            std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--no-arbitration] [--equal-weights] [--status-file PATH] [--status-interval S] [--trace-cpus LIST]\n";
             return 2;
         }
     }
     if (manifest_path.empty()) {
-        std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--no-arbitration] [--equal-weights] [--status-file PATH] [--status-interval S]\n";
+        std::cerr << "usage: vrm_manager MANIFEST.yaml [--exit-after S] [--report-interval S] [--no-cgroups] [--require-cgroups] [--no-rt] [--no-arbitration] [--equal-weights] [--status-file PATH] [--status-interval S] [--trace-cpus LIST]\n";
         return 2;
     }
 
@@ -93,6 +98,16 @@ int main(int argc, char** argv) {
     if (!status_file.empty()) {
         manager.set_status_file(status_file,
                                 std::chrono::milliseconds(static_cast<long>(status_interval_seconds * 1000)));
+    }
+    if (!trace_cpus.empty()) {
+        std::string reason;
+        auto tracer = vrm::CpuTracer::start(vrm::parse_cpu_list(trace_cpus), 2.0, reason);
+        if (tracer) {
+            vrm::log::info("manager", "tracing which node runs on CPUs " + trace_cpus);
+            manager.set_cpu_tracer(std::move(tracer));
+        } else {
+            vrm::log::warn("manager", "CPU timeline disabled: " + reason);
+        }
     }
 
     if (!manager.start()) {

@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -60,6 +61,9 @@ ManagedNode::ManagedNode(std::string name, std::chrono::microseconds tick_period
           [this] { return on_error(); },
       }),
       dds_(std::make_unique<Dds>()) {
+    // Name the main thread after the node (max 15 characters), so tools such
+    // as the manager's CPU timeline, top or ftrace can tell the nodes apart.
+    prctl(PR_SET_NAME, name_.substr(0, 15).c_str(), 0, 0, 0);
     if (const char* id = std::getenv(dds_lifecycle::kManagerIdEnv)) {
         manager_id_ = std::strtoull(id, nullptr, 10);
     }

@@ -21,6 +21,15 @@
     --warning: #fab219;
     --critical: #d03b3b;
     --chip: #e8f0fb;
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
+    --series-5: #e87ba4;
+    --series-6: #008300;
+    --series-7: #4a3aa7;
+    --series-8: #e34948;
+    --other: #c3c2b7;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -35,6 +44,15 @@
       --border: rgba(255, 255, 255, 0.10);
       --usage: #3987e5;
       --chip: #1d2c40;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --series-5: #d55181;
+      --series-6: #008300;
+      --series-7: #9085e9;
+      --series-8: #e66767;
+      --other: #52514e;
     }
   }
   :root[data-theme="dark"] {
@@ -49,6 +67,15 @@
     --border: rgba(255, 255, 255, 0.10);
     --usage: #3987e5;
     --chip: #1d2c40;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --series-5: #d55181;
+      --series-6: #008300;
+      --series-7: #9085e9;
+      --series-8: #e66767;
+      --other: #52514e;
   }
 
   * { box-sizing: border-box; }
@@ -85,6 +112,21 @@
   }
   .core-note { font-size: 11px; color: var(--text-muted); }
   .unpinned { margin-top: 10px; font-size: 13px; color: var(--text-secondary); }
+
+  /* CPU timeline */
+  .timeline-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) 150px; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .timeline-row svg { display: block; width: 100%; height: 26px; }
+  .timeline-label { font-size: 12px; color: var(--text-secondary); }
+  .timeline-now { font-size: 12px; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .timeline-axis { display: grid; grid-template-columns: 56px minmax(0, 1fr) 150px; gap: 10px; font-size: 11px; color: var(--text-muted); }
+  .timeline-axis div:nth-child(2) { display: flex; justify-content: space-between; }
+  .segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .segmented button { font: inherit; font-size: 12px; color: var(--text-primary); background: var(--track); border: 0; padding: 3px 9px; cursor: pointer; }
+  .segmented button[aria-pressed=true] { background: var(--usage); color: #fff; }
+  .timeline-wrap { position: relative; }
 
   /* Nodes */
   .node { display: grid; grid-template-columns: 200px repeat(3, minmax(0, 1fr)); gap: 16px; padding: 12px 0; border-top: 1px solid var(--border); }
@@ -136,6 +178,19 @@
     <h2>CPU cores <span class="muted">(which node may run where)</span></h2>
     <div class="cores" id="cores"></div>
     <div class="unpinned" id="unpinned"></div>
+  </section>
+
+  <section class="card" id="timeline-card" hidden>
+    <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;margin-bottom:10px">
+      <h2 style="margin:0">CPU timeline <span class="muted">(which node runs on each CPU; from kernel sched_switch events)</span></h2>
+      <div class="segmented" role="group" aria-label="Time window" id="zoom">
+        <button data-ms="100">100 ms</button><button data-ms="200">200 ms</button><button data-ms="500">500 ms</button><button data-ms="2000">2 s</button>
+      </div>
+    </div>
+    <div class="timeline-wrap" id="timeline"></div>
+    <div class="timeline-axis"><div></div><div id="timeline-ticks"></div><div></div></div>
+    <div class="legend" id="timeline-legend"></div>
+    <div class="tooltip" id="timeline-tooltip"></div>
   </section>
 
   <section class="card">
@@ -395,6 +450,76 @@ function drawSpark(container, hoverKey, points, key, textKey, now, limitLabel = 
   if (hover && hover.key === hoverKey) show(hover.clientX);
 }
 
+// ---------- CPU timeline ----------
+
+function nodeColor(data, who) {
+  if (who === "other") return "var(--other)";
+  const index = data.nodes.findIndex((n) => n.name === who);
+  return index < 0 ? "var(--other)" : `var(--series-${(index % 8) + 1})`;
+}
+
+let zoomMs = 200;
+try { zoomMs = Number(localStorage.getItem("vrm-zoom")) || 200; } catch (e) {}
+document.querySelectorAll("#zoom button").forEach((button) => {
+  button.onclick = () => {
+    zoomMs = Number(button.dataset.ms);
+    try { localStorage.setItem("vrm-zoom", String(zoomMs)); } catch (e) {}
+    if (lastData) renderTimeline(lastData);
+  };
+});
+
+function renderTimeline(data) {
+  const card = document.getElementById("timeline-card");
+  const timeline = data.cpu_timeline;
+  card.hidden = !timeline;
+  if (!timeline) return;
+
+  const container = document.getElementById("timeline");
+  const tooltip = document.getElementById("timeline-tooltip");
+  const window_ms = Math.min(zoomMs, timeline.window_ms);
+  container.innerHTML = "";
+  document.querySelectorAll("#zoom button").forEach((button) =>
+    button.setAttribute("aria-pressed", String(Number(button.dataset.ms) === window_ms)));
+  const label = (ms) => (ms >= 1000 ? `-${ms / 1000} s` : `-${ms} ms`);
+  document.getElementById("timeline-ticks").innerHTML =
+    `<span>${label(window_ms)}</span><span>${label(window_ms / 2)}</span><span>now</span>`;
+
+  for (const cpu of timeline.cpus) {
+    const row = document.createElement("div");
+    row.className = "timeline-row";
+    const running = cpu.segments.length ? cpu.segments[cpu.segments.length - 1][2] : "idle";
+    row.innerHTML = `<div class="timeline-label">CPU ${cpu.cpu}</div><div><svg role="img" aria-label="CPU ${cpu.cpu} timeline"></svg></div>
+      <div class="timeline-now">${running === "idle"
+        ? '<span class="muted">now: idle</span>'
+        : `<span class="swatch" style="background:${nodeColor(data, running)}"></span>now: ${escapeHtml(running)}`}</div>`;
+    container.append(row);
+
+    const svg = row.querySelector("svg");
+    const width = svg.clientWidth, height = svg.clientHeight;
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    el("rect", {x: 0, y: 0, width, height, rx: 3, fill: "var(--track)"}, svg);
+    const x = (ms) => Math.max(0, (1 + ms / window_ms) * width);
+    for (const [start, end, who] of cpu.segments) {
+      if (who === "idle" || end < -window_ms) continue;
+      const rect = el("rect", {x: x(start), y: 2, width: Math.max(0.6, x(end) - x(start)), height: height - 4,
+                               fill: nodeColor(data, who)}, svg);
+      rect.addEventListener("pointermove", (event) => {
+        tooltip.innerHTML = `<b>${escapeHtml(who)}</b> <span class="muted">CPU ${cpu.cpu} · ran ${(end - start).toFixed(2)} ms · ${(-end / 1000).toFixed(2)} s ago</span>`;
+        tooltip.style.display = "block";
+        const box = container.getBoundingClientRect();
+        tooltip.style.left = `${Math.min(event.clientX - box.left + 12, box.width - tooltip.offsetWidth)}px`;
+        tooltip.style.top = `${event.clientY - box.top + 36}px`;
+      });
+      rect.addEventListener("pointerleave", () => { tooltip.style.display = "none"; });
+    }
+  }
+
+  const names = data.nodes.map((n) => n.name);
+  document.getElementById("timeline-legend").innerHTML = names.concat(["other"]).map((who) =>
+    `<span><span class="swatch" style="background:${nodeColor(data, who)}"></span>${escapeHtml(who === "other" ? "other (DDS threads, system)" : who)}</span>`
+  ).join("") + '<span><span class="swatch" style="background:var(--track);border:1px solid var(--border)"></span>idle</span>';
+}
+
 // ---------- events ----------
 
 function renderEvents(data) {
@@ -430,6 +555,7 @@ async function refresh() {
     document.getElementById("system").textContent = data.system;
 
     renderCores(data);
+    renderTimeline(data);
     renderNodes(data);
     renderEvents(data);
   } catch (error) {
@@ -438,8 +564,13 @@ async function refresh() {
 }
 
 window.addEventListener("resize", () => lastData && renderNodes(lastData));
-refresh();
-setInterval(refresh, 1000);
+// Poll faster when a CPU timeline is shown, so it visibly scrolls.
+let pollTimer = null;
+function schedule() {
+  const interval = lastData && lastData.cpu_timeline ? 250 : 1000;
+  pollTimer = setTimeout(async () => { await refresh(); schedule(); }, interval);
+}
+refresh().then(schedule);
 </script>
 </body>
 </html>

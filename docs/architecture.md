@@ -221,8 +221,10 @@ name their main thread after themselves (`prctl(PR_SET_NAME)`, 15
 characters), which maps thread names back to nodes; everything else is
 "other". The status file carries the segments relative to now, and the
 dashboard polls every 250 ms and draws them per CPU with a 100 ms - 2 s zoom.
-Tracing is global to the kernel, so the manager switches it off again on
-exit.
+Each manager uses its own ftrace instance
+(`/sys/kernel/tracing/instances/vrm-<random>`) with a private buffer, event
+switches and `trace_pipe`, so several managers (or other tools using the
+global trace) can trace at the same time; the instance is removed on exit.
 
 ## 7. Real-time Scheduling and Supervision
 

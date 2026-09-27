@@ -6,10 +6,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <random>
 
 namespace vrm {
 
@@ -61,14 +63,24 @@ double CpuTracer::monotonic_now() {
 
 std::unique_ptr<CpuTracer> CpuTracer::start(const std::vector<int>& cpus, double window_seconds,
                                             std::string& reason) {
-    std::string tracing = "/sys/kernel/tracing";
+    const std::string root = "/sys/kernel/tracing";
     struct stat info {};
-    if (stat((tracing + "/trace_pipe").c_str(), &info) != 0) {
-        mkdir(tracing.c_str(), 0755);
-        if (mount("nodev", tracing.c_str(), "tracefs", 0, nullptr) != 0) {
+    if (stat((root + "/instances").c_str(), &info) != 0) {
+        mkdir(root.c_str(), 0755);
+        if (mount("nodev", root.c_str(), "tracefs", 0, nullptr) != 0) {
             reason = std::string("cannot mount tracefs (run the container with --privileged): ") + std::strerror(errno);
             return nullptr;
         }
+    }
+    // A private instance: its own buffer, events and trace_pipe. The name must
+    // be unique across containers, where every manager may well be PID 1.
+    std::random_device random;
+    char name[32];
+    std::snprintf(name, sizeof(name), "vrm-%08x", random());
+    const std::string tracing = root + "/instances/" + name;
+    if (mkdir(tracing.c_str(), 0755) != 0) {
+        reason = "cannot create ftrace instance " + tracing + ": " + std::strerror(errno);
+        return nullptr;
     }
     const bool ok = write_text(tracing + "/tracing_on", "0") && write_text(tracing + "/trace", "") &&
                     write_text(tracing + "/trace_clock", "mono") &&
@@ -77,9 +89,15 @@ std::unique_ptr<CpuTracer> CpuTracer::start(const std::vector<int>& cpus, double
                     write_text(tracing + "/tracing_on", "1");
     if (!ok) {
         reason = "cannot configure ftrace in " + tracing + ": " + std::strerror(errno);
+        rmdir(tracing.c_str());
         return nullptr;
     }
-    return std::unique_ptr<CpuTracer>(new CpuTracer(cpus, window_seconds, tracing));
+    std::unique_ptr<CpuTracer> tracer(new CpuTracer(cpus, window_seconds, tracing));
+    if (tracer->pipe_fd_ < 0) {
+        reason = "cannot open " + tracing + "/trace_pipe: " + std::strerror(errno);
+        return nullptr;
+    }
+    return tracer;
 }
 
 CpuTracer::CpuTracer(std::vector<int> cpus, double window_seconds, std::string tracing)
@@ -92,11 +110,10 @@ CpuTracer::~CpuTracer() {
     running_ = false;
     if (reader_.joinable()) reader_.join();
     if (pipe_fd_ >= 0) close(pipe_fd_);
-    // Leave the kernel as we found it: tracing off, all CPUs, event disabled.
+    // Remove our instance; the global trace and other instances are untouched.
     write_text(tracing_ + "/tracing_on", "0");
     write_text(tracing_ + "/events/sched/sched_switch/enable", "0");
-    write_text(tracing_ + "/tracing_cpumask", "ffffffff");
-    write_text(tracing_ + "/trace", "");
+    rmdir(tracing_.c_str());
 }
 
 void CpuTracer::read_loop() {
@@ -114,7 +131,9 @@ void CpuTracer::read_loop() {
         for (auto newline = pending.find('\n'); newline != std::string::npos;
              newline = pending.find('\n', line_start)) {
             SchedSwitch event{};
-            if (parse_sched_switch(pending.substr(line_start, newline - line_start), event)) {
+            // The instance may hold a few events from before the CPU mask applied.
+            if (parse_sched_switch(pending.substr(line_start, newline - line_start), event) &&
+                std::find(cpus_.begin(), cpus_.end(), event.cpu) != cpus_.end()) {
                 auto current = current_.find(event.cpu);
                 if (current != current_.end()) {
                     auto& closed = segments_[event.cpu];

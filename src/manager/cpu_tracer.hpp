@@ -1,9 +1,10 @@
 // Records which thread runs on which CPU, from the kernel's sched_switch
 // trace events (ftrace), for a timeline of the selected CPUs.
 //
-// Needs tracefs (a privileged container). Tracing is global to the kernel:
-// while a CpuTracer exists it owns /sys/kernel/tracing, and it switches
-// tracing off again when destroyed.
+// Needs tracefs (a privileged container). Each tracer uses its own ftrace
+// instance (/sys/kernel/tracing/instances/vrm-<random>) with a private buffer,
+// event switches and trace_pipe, so several managers - or other tools using
+// the global trace - do not interfere; the instance is removed on exit.
 #pragma once
 
 #include <atomic>
@@ -53,7 +54,7 @@ private:
 
     std::vector<int> cpus_;
     double window_seconds_;
-    std::string tracing_;  // tracefs mount point
+    std::string tracing_;  // The instance directory.
     int pipe_fd_ = -1;
     std::atomic<bool> running_{true};
     std::thread reader_;

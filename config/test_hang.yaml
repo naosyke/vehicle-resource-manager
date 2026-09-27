@@ -1,0 +1,11 @@
+# Test: a node that stops responding is detected by its missing heartbeat,
+# killed and restarted.
+system: test_hang
+transition_timeout_ms: 3000
+heartbeat_timeout_ms: 800
+nodes:
+  - name: perception
+    executable: vrm_demo_node
+    args: ["--period-ms", "50", "--work-ms", "5", "--hang-after-sec", "0.5"]
+    criticality: mission_critical
+    max_restarts: 1

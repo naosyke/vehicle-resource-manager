@@ -16,8 +16,11 @@ std::string resolve_executable(const std::string& executable);
 // Starts `executable args...` in its own process group. When `cgroup_procs`
 // is set, the child moves itself into that cgroup before exec, so the
 // resource limits apply from its first instruction. Throws on failure.
+// `rt_priority` 1-99 switches the child to SCHED_FIFO with that priority
+// before exec (needs CAP_SYS_NICE); 0 keeps normal scheduling.
 pid_t spawn_process(const std::string& executable, const std::vector<std::string>& args,
-                    const std::string& cgroup_procs = "", const std::vector<std::string>& extra_env = {});
+                    const std::string& cgroup_procs = "", const std::vector<std::string>& extra_env = {},
+                    int rt_priority = 0);
 
 struct ExitInfo {
     pid_t pid;

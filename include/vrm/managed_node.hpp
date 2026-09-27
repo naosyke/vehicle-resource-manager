@@ -3,6 +3,10 @@
 // Subclasses override the on_* callbacks and on_tick(), which runs
 // periodically while the node is Active. run() blocks until the node is
 // finalized or receives SIGINT / SIGTERM.
+//
+// While running, the node publishes a heartbeat every 500 ms with its
+// scheduling policy and the timing of its ticks (latency, response time and
+// deadline misses), so the manager can supervise it.
 #pragma once
 
 #include <atomic>
@@ -11,13 +15,17 @@
 #include <memory>
 #include <string>
 
+#include "vrm/deadline_monitor.hpp"
 #include "vrm/lifecycle.hpp"
 
 namespace vrm {
 
 class ManagedNode {
 public:
-    ManagedNode(std::string name, std::chrono::milliseconds tick_period);
+    // `deadline` is relative to each tick's release; zero means the period,
+    // a negative value means no deadline (misses are not counted).
+    ManagedNode(std::string name, std::chrono::microseconds tick_period,
+                std::chrono::microseconds deadline = std::chrono::microseconds{0});
     virtual ~ManagedNode();
 
     ManagedNode(const ManagedNode&) = delete;
@@ -46,10 +54,14 @@ private:
     void handle_command(std::uint32_t request_id, Transition transition);
     void publish_status(State state, std::uint32_t request_id, bool success, const std::string& message);
     void shutdown_gracefully();
+    void publish_heartbeat();
+    void run_tick(std::chrono::steady_clock::time_point& next_tick);
 
     std::string name_;
     std::uint64_t manager_id_ = 0;  // From VRM_MANAGER_ID; 0 accepts any manager.
-    std::chrono::milliseconds tick_period_;
+    std::chrono::microseconds tick_period_;
+    DeadlineMonitor monitor_;
+    std::uint64_t heartbeat_sequence_ = 0;
     LifecycleStateMachine machine_;
     std::unique_ptr<Dds> dds_;
     std::uint32_t current_request_ = 0;

@@ -22,6 +22,9 @@ struct LifecycleClient::Dds {
         publisher, command_topic, dds_lifecycle::command_writer_qos(publisher)};
     dds::sub::DataReader<msg::LifecycleStatus> status_reader{
         subscriber, status_topic, dds_lifecycle::status_reader_qos(subscriber)};
+    dds::topic::Topic<msg::NodeHeartbeat> heartbeat_topic{participant, dds_lifecycle::kHeartbeatTopic};
+    dds::sub::DataReader<msg::NodeHeartbeat> heartbeat_reader{
+        subscriber, heartbeat_topic, dds_lifecycle::heartbeat_reader_qos(subscriber)};
 };
 
 LifecycleClient::LifecycleClient(std::uint64_t manager_id)
@@ -29,6 +32,25 @@ LifecycleClient::LifecycleClient(std::uint64_t manager_id)
 LifecycleClient::~LifecycleClient() = default;
 
 void LifecycleClient::poll() {
+    for (const auto& sample : dds_->heartbeat_reader.take()) {
+        if (!sample.info().valid() || sample.data().manager_id() != manager_id_) continue;
+        const auto& data = sample.data();
+        auto& heartbeat = heartbeats_[data.node()];
+        heartbeat.received_at = std::chrono::steady_clock::now();
+        heartbeat.pid = data.pid();
+        heartbeat.counter = data.counter();
+        heartbeat.sched_policy = data.sched_policy();
+        heartbeat.sched_priority = data.sched_priority();
+        heartbeat.period_us = data.period_us();
+        heartbeat.deadline_us = data.deadline_us();
+        heartbeat.total_ticks = data.total_ticks();
+        heartbeat.total_misses = data.total_misses();
+        heartbeat.window_misses = data.window_misses();
+        heartbeat.window_max_latency_us = data.window_max_latency_us();
+        heartbeat.window_max_response_us = data.window_max_response_us();
+        heartbeat.window_avg_response_us = data.window_avg_response_us();
+    }
+
     for (const auto& sample : dds_->status_reader.take()) {
         if (!sample.info().valid() || sample.data().manager_id() != manager_id_) {
             continue;  // Another system's node.
@@ -55,6 +77,12 @@ void LifecycleClient::poll() {
         }
         current = next;
     }
+}
+
+std::optional<Heartbeat> LifecycleClient::heartbeat(const std::string& node) const {
+    const auto it = heartbeats_.find(node);
+    if (it == heartbeats_.end()) return std::nullopt;
+    return it->second;
 }
 
 std::optional<NodeStatus> LifecycleClient::status(const std::string& node) const {

@@ -1,6 +1,7 @@
 #include "process.hpp"
 
 #include <fcntl.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -58,7 +59,8 @@ bool join_cgroup(const char* procs_path) {
 }  // namespace
 
 pid_t spawn_process(const std::string& executable, const std::vector<std::string>& args,
-                    const std::string& cgroup_procs, const std::vector<std::string>& extra_env) {
+                    const std::string& cgroup_procs, const std::vector<std::string>& extra_env,
+                    int rt_priority) {
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>(executable.c_str()));
     for (const auto& arg : args) {
@@ -85,6 +87,15 @@ pid_t spawn_process(const std::string& executable, const std::vector<std::string
             write_stderr(cgroup_procs.c_str());
             write_stderr("\n");
             _exit(126);
+        }
+        if (rt_priority > 0) {
+            sched_param param{};
+            param.sched_priority = rt_priority;
+            // On failure the node runs with normal scheduling; the manager
+            // notices from the node's heartbeat and warns.
+            if (sched_setscheduler(0, SCHED_FIFO, &param) != 0) {
+                write_stderr("cannot set SCHED_FIFO (missing CAP_SYS_NICE?)\n");
+            }
         }
         execvpe(argv[0], argv.data(), envp.data());
         write_stderr("cannot execute ");

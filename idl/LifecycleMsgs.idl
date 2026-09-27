@@ -51,5 +51,33 @@ struct LifecycleStatus {
     long pid;
 };
 
+// Node -> manager, every 500 ms from start until the node is finalized.
+// Topic "vrm_node_heartbeat". QoS: best effort, volatile, keep last 1: a lost
+// heartbeat is replaced by the next one; missing several means the node hangs.
+@topic
+struct NodeHeartbeat {
+    @key unsigned long long manager_id;
+    @key string node;
+    long pid;
+    unsigned long long counter;   // Increments with every heartbeat.
+    LifecycleState state;
+
+    // Scheduling actually in effect (sched_getscheduler), e.g. SCHED_FIFO 80.
+    string sched_policy;
+    long sched_priority;
+
+    // Periodic task timing, in microseconds. Totals since activation; the
+    // window covers the time since the previous heartbeat.
+    unsigned long period_us;
+    unsigned long deadline_us;
+    unsigned long long total_ticks;
+    unsigned long long total_misses;
+    unsigned long window_ticks;
+    unsigned long window_misses;
+    unsigned long window_max_latency_us;
+    unsigned long window_max_response_us;
+    unsigned long window_avg_response_us;
+};
+
 };
 };

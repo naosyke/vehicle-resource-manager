@@ -20,6 +20,18 @@ namespace vrm {
 namespace {
 constexpr auto kExitGracePeriod = std::chrono::milliseconds(2000);
 constexpr std::size_t kMaxEvents = 100;
+constexpr auto kMissReportInterval = std::chrono::seconds(5);
+
+// Restart delay: 250 ms, 500 ms, 1 s, 2 s, then 4 s.
+std::chrono::milliseconds restart_backoff(int restarts) {
+    return std::chrono::milliseconds(250 << std::min(restarts, 4));
+}
+
+std::string format_ms(std::uint32_t microseconds) {
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.2f ms", microseconds / 1000.0);
+    return text;
+}
 
 double now_seconds() {
     return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -77,9 +89,11 @@ std::string_view to_string(NodeOutcome outcome) {
     return "unknown";
 }
 
-Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, std::uint64_t manager_id)
+Manager::Manager(SystemManifest manifest, std::unique_ptr<CgroupManager> cgroups, bool realtime,
+                 std::uint64_t manager_id)
     : manifest_(std::move(manifest)),
       cgroups_(std::move(cgroups)),
+      realtime_(realtime),
       client_(manager_id ? manager_id : random_manager_id()) {
     for (const auto* spec : startup_order(manifest_)) {
         RunningNode node{};
@@ -122,7 +136,8 @@ void Manager::reap_children() {
                 continue;
             }
             node.running = false;
-            auto description = describe_exit(exit->status);
+            auto description = node.kill_reason.empty() ? describe_exit(exit->status) : node.kill_reason;
+            node.kill_reason.clear();
             if (node.in_cgroup) {
                 sample_resources(node);
                 if (node.usage.oom_kills > 0) {
@@ -137,6 +152,7 @@ void Manager::reap_children() {
                                      ") " + description + " unexpectedly";
                 note(node.spec->criticality == Criticality::SafetyCritical ? Level::Error : Level::Warn,
                      node.spec->name, message);
+                schedule_restart(node);
             }
         }
     }
@@ -145,6 +161,93 @@ void Manager::reap_children() {
 bool Manager::is_running(const RunningNode& node) {
     reap_children();
     return node.running;
+}
+
+void Manager::schedule_restart(RunningNode& node) {
+    const auto& spec = *node.spec;
+    if (stopping_ || spec.restart == RestartPolicy::Never) return;
+    if (node.restarts >= spec.max_restarts) {
+        note(Level::Error, spec.name,
+             spec.name + " reached its restart limit (" + std::to_string(spec.max_restarts) + ")");
+        if (spec.criticality == Criticality::SafetyCritical) {
+            note(Level::Error, spec.name, "safety-critical node " + spec.name + " is lost; the system is degraded");
+        }
+        return;
+    }
+    const auto delay = restart_backoff(node.restarts);
+    node.restart_pending = true;
+    node.restart_at = std::chrono::steady_clock::now() + delay;
+    note(Level::Info, spec.name,
+         "restarting " + spec.name + " in " + std::to_string(delay.count()) + " ms (attempt " +
+             std::to_string(node.restarts + 1) + "/" + std::to_string(spec.max_restarts) + ")");
+}
+
+void Manager::supervise_node(RunningNode& node) {
+    const auto& spec = *node.spec;
+    const auto now = std::chrono::steady_clock::now();
+
+    if (node.restart_pending && now >= node.restart_at) {
+        node.restart_pending = false;
+        ++node.restarts;
+        node.scheduling_checked = false;
+        if (start_node(node)) {
+            note(Level::Info, spec.name, spec.name + " restarted (" + std::to_string(node.restarts) + " restarts)");
+        } else if (node.outcome != NodeOutcome::Skipped) {
+            schedule_restart(node);
+        }
+        return;
+    }
+    if (node.outcome != NodeOutcome::Active || !node.running) return;
+
+    // Alive supervision: heartbeats come every 500 ms from process start.
+    const auto heartbeat = client_.heartbeat(spec.name);
+    const bool current = heartbeat && heartbeat->pid == node.pid;
+    const auto last_sign_of_life = current ? heartbeat->received_at : node.spawned_at;
+    if (now - last_sign_of_life > manifest_.heartbeat_timeout) {
+        const auto silent_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sign_of_life).count();
+        note(spec.criticality == Criticality::SafetyCritical ? Level::Error : Level::Warn, spec.name,
+             spec.name + " sent no heartbeat for " + std::to_string(silent_ms) + " ms; killing it");
+        node.kill_reason = "heartbeat lost (hung for " + std::to_string(silent_ms) + " ms)";
+        kill(node.pid, SIGKILL);
+        return;
+    }
+    if (!current || heartbeat->counter == node.seen_heartbeat) return;
+    node.seen_heartbeat = heartbeat->counter;
+
+    // The scheduling policy the kernel actually applied.
+    if (!node.scheduling_checked) {
+        node.scheduling_checked = true;
+        const int wanted = rt_priority(spec);
+        if (wanted > 0 && (heartbeat->sched_policy != "SCHED_FIFO" || heartbeat->sched_priority != wanted)) {
+            note(Level::Warn, spec.name,
+                 spec.name + " should run as SCHED_FIFO " + std::to_string(wanted) + " but runs as " +
+                     heartbeat->sched_policy + " (missing CAP_SYS_NICE?)");
+        }
+    }
+
+    // Deadline misses, reported at most every 5 s per node.
+    node.unreported_misses += heartbeat->window_misses;
+    node.unreported_max_response_us = std::max(node.unreported_max_response_us, heartbeat->window_max_response_us);
+    if (node.unreported_misses > 0 && now - node.misses_reported_at >= kMissReportInterval) {
+        note(spec.criticality == Criticality::SafetyCritical ? Level::Error : Level::Warn, spec.name,
+             spec.name + " missed " + std::to_string(node.unreported_misses) + " deadlines (deadline " +
+                 format_ms(heartbeat->deadline_us) + ", worst response " +
+                 format_ms(node.unreported_max_response_us) + ")");
+        node.unreported_misses = 0;
+        node.unreported_max_response_us = 0;
+        node.misses_reported_at = now;
+    }
+
+    // cpu.max does not apply to SCHED_FIFO tasks, so watch their budget here.
+    if (node.in_cgroup && heartbeat->sched_policy == "SCHED_FIFO" && spec.resources.cpu_cores &&
+        node.cpu_percent > *spec.resources.cpu_cores * 100.0 + 5.0 &&
+        now - node.rt_overrun_reported_at >= kMissReportInterval) {
+        char text[64];
+        std::snprintf(text, sizeof(text), "%.0f%% CPU, above its budget of %.0f%%", node.cpu_percent,
+                      *spec.resources.cpu_cores * 100.0);
+        note(Level::Warn, spec.name, spec.name + " uses " + text + " (not enforceable for SCHED_FIFO)");
+        node.rt_overrun_reported_at = now;
+    }
 }
 
 void Manager::fail_node(RunningNode& node, const std::string& reason) {
@@ -180,7 +283,8 @@ bool Manager::start_node(RunningNode& node) {
         }
         const std::string manager_env =
             std::string(dds_lifecycle::kManagerIdEnv) + "=" + std::to_string(client_.manager_id());
-        node.pid = spawn_process(executable, args, cgroup_procs, {manager_env});
+        node.pid = spawn_process(executable, args, cgroup_procs, {manager_env}, rt_priority(spec));
+        node.spawned_at = std::chrono::steady_clock::now();
     } catch (const std::exception& error) {
         node.outcome = NodeOutcome::Failed;
         node.detail = error.what();
@@ -188,8 +292,14 @@ bool Manager::start_node(RunningNode& node) {
         return false;
     }
     node.running = true;
-    note(Level::Info, spec.name, "spawned " + spec.name + " (pid " + std::to_string(node.pid) + ", " +
-                                     std::string(to_string(spec.criticality)) + ")");
+    const int priority = rt_priority(spec);
+    note(Level::Info, spec.name,
+         "spawned " + spec.name + " (pid " + std::to_string(node.pid) + ", " + std::string(to_string(spec.criticality)) +
+             (priority ? ", SCHED_FIFO " + std::to_string(priority) : "") + ")");
+    if (priority && cgroups_ && spec.resources.cpu_cores && node.restarts == 0) {
+        note(Level::Info, spec.name,
+             spec.name + ": cgroup cpu.max does not limit SCHED_FIFO tasks; its CPU budget is monitored only");
+    }
 
     const auto alive = [&] { return is_running(node); };
     if (!client_.wait_for_state(spec.name, node.pid, State::Unconfigured, manifest_.transition_timeout, alive)) {
@@ -245,12 +355,17 @@ void Manager::supervise(std::chrono::milliseconds duration, std::chrono::millise
             write_status();
             next_status += status_interval_;
         }
-        if (cgroups_ && report_interval.count() > 0 && now >= next_report) {
+        if (report_interval.count() > 0 && now >= next_report) {
             print_resources();
+            print_timing();
             next_report += report_interval;
         }
         client_.poll();
         reap_children();
+        for (auto& node : nodes_) {
+            if (node.in_cgroup && node.running) sample_if_stale(node);
+            supervise_node(node);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 }
@@ -316,6 +431,29 @@ void Manager::write_status() {
         json << ",\"memory_bytes\":";
         if (spec.resources.memory_bytes) json << *spec.resources.memory_bytes; else json << "null";
         json << ",\"cpus\":" << json_int_list(spec.resources.cpus) << "}";
+        json << ",\"restart_policy\":" << json_string(to_string(spec.restart)) << ",\"restarts\":" << node.restarts
+             << ",\"restart_pending\":" << (node.restart_pending ? "true" : "false");
+
+        const auto heartbeat = client_.heartbeat(spec.name);
+        const int wanted = rt_priority(spec);
+        json << ",\"sched\":{\"requested\":" << json_string(wanted ? "SCHED_FIFO" : "SCHED_OTHER")
+             << ",\"requested_priority\":" << wanted;
+        if (heartbeat && heartbeat->pid == node.pid) {
+            const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - heartbeat->received_at)
+                                 .count();
+            json << ",\"policy\":" << json_string(heartbeat->sched_policy)
+                 << ",\"priority\":" << heartbeat->sched_priority << "}"
+                 << ",\"heartbeat_age_ms\":" << age << ",\"timing\":{\"period_us\":" << heartbeat->period_us
+                 << ",\"deadline_us\":" << heartbeat->deadline_us << ",\"total_ticks\":" << heartbeat->total_ticks
+                 << ",\"total_misses\":" << heartbeat->total_misses
+                 << ",\"window_misses\":" << heartbeat->window_misses
+                 << ",\"max_latency_us\":" << heartbeat->window_max_latency_us
+                 << ",\"max_response_us\":" << heartbeat->window_max_response_us
+                 << ",\"avg_response_us\":" << heartbeat->window_avg_response_us << "}";
+        } else {
+            json << ",\"policy\":null,\"priority\":null},\"heartbeat_age_ms\":null,\"timing\":null";
+        }
         if (node.in_cgroup) {
             json << ",\"usage\":{\"cpu_percent\":" << (node.running ? node.cpu_percent : 0.0)
                  << ",\"memory_bytes\":" << node.usage.memory_current
@@ -375,11 +513,29 @@ void Manager::print_resources() {
                     memory_limit.c_str(), static_cast<unsigned long long>(node.usage.nr_throttled),
                     static_cast<unsigned long long>(node.usage.oom_kills));
     }
+}
+
+void Manager::print_timing() {
+    std::printf("\n%-20s %-14s %9s %9s %9s %9s %8s %8s\n", "TIMING", "SCHEDULING", "PERIOD", "DEADLINE",
+                "MAX RESP", "MAX LAT", "MISSES", "RESTARTS");
+    for (const auto& node : nodes_) {
+        const auto heartbeat = client_.heartbeat(node.spec->name);
+        if (!heartbeat || heartbeat->pid != node.pid || !heartbeat->period_us) continue;
+        const std::string scheduling =
+            heartbeat->sched_policy + (heartbeat->sched_priority ? " " + std::to_string(heartbeat->sched_priority) : "");
+        std::printf("%-20s %-14s %9s %9s %9s %9s %8llu %8d\n", node.spec->name.c_str(), scheduling.c_str(),
+                    format_ms(heartbeat->period_us).c_str(), format_ms(heartbeat->deadline_us).c_str(),
+                    format_ms(heartbeat->window_max_response_us).c_str(),
+                    format_ms(heartbeat->window_max_latency_us).c_str(),
+                    static_cast<unsigned long long>(heartbeat->total_misses), node.restarts);
+    }
     std::printf("\n");
     std::fflush(stdout);
 }
 
 void Manager::stop() {
+    stopping_ = true;
+    for (auto& node : nodes_) node.restart_pending = false;
     bool any_running = false;
     for (auto& node : nodes_) {
         any_running = any_running || is_running(node);

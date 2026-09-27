@@ -44,8 +44,16 @@ function such as infotainment misbehaves.
   before `exec`, so limits apply from its first instruction
 * **Resource monitoring**: per-node CPU usage, memory, peak memory, CPU
   throttling and OOM kills, read from the cgroup files
-* **Live dashboard**: CPU core map, usage against budget per node, and events
-  in the browser
+* **Real-time scheduling**: nodes with a priority run as `SCHED_FIFO`, set
+  between `fork` and `exec`; the manager checks the policy the kernel really
+  applied
+* **Deadline monitoring**: every node measures release latency, response time
+  and deadline misses of its periodic work and reports them in a heartbeat
+* **Alive supervision and restarts**: a node whose heartbeat stops is treated
+  as hung and killed; crashed or hung nodes are restarted with backoff
+  according to their restart policy
+* **Live dashboard**: CPU core map, usage against budget, response time
+  against deadline, and events in the browser
 
 ## Requirements
 
@@ -92,6 +100,8 @@ Press Ctrl-C to shut the system down in order.
 | `--report-interval SECONDS` | Resource report interval (default 5, 0 = off) |
 | `--no-cgroups` | Do not enforce resource budgets |
 | `--require-cgroups` | Exit with code 3 if budgets cannot be enforced |
+| `--no-rt` | Run every node with normal scheduling (for comparisons) |
+| `--status-file PATH` | Write a JSON status snapshot for the dashboard |
 
 ```text
 17:40:36.450 INFO  [manager] spawned brake_control (pid 31, safety_critical)
@@ -108,6 +118,34 @@ path_planning        mission_critical    40      47 active
 infotainment         best_effort          0      55 active
 telemetry_uploader   best_effort          0      63 active
 ```
+
+### Demo: real-time priority protects the brake's deadline
+
+In [`config/demo_cpu_contention.yaml`](config/demo_cpu_contention.yaml), two
+CPU hogs share CPU 0 with brake_control, which has 2 ms of work every 10 ms and
+a 4 ms deadline. Compare normal scheduling with `SCHED_FIFO`:
+
+```bash
+docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/demo_cpu_contention.yaml --no-rt --exit-after 30
+docker run --rm --privileged --cgroupns=private -v "$PWD":/workspace vrm-base \
+  build/vrm_manager config/demo_cpu_contention.yaml --exit-after 30
+```
+
+Measured over 30 s (about 3000 activations) with Docker Desktop on macOS:
+
+| Setup | Scheduling | Deadline misses | Max release latency |
+|---|---|---|---|
+| brake_control alone on CPU 0 | SCHED_FIFO 80 | 16 | 0.37 ms |
+| with 2 CPU hogs on CPU 0 | SCHED_OTHER (`--no-rt`) | **342** (11 %) | 2.48 ms |
+| with 2 CPU hogs on CPU 0 | SCHED_FIFO 80 | **9** (0.3 %) | **0.01 ms** |
+
+With `SCHED_FIFO` the hogs cause no additional misses: the remaining misses
+also happen with brake_control alone. They come from the virtual machine, not
+from other Linux tasks - `cyclictest` in the same container measures kernel
+wake-up latencies of up to 54 ms. Hard real-time needs native Linux with a
+`PREEMPT_RT` kernel and isolated CPUs; see
+[docs/architecture.md](docs/architecture.md#7-real-time-scheduling-and-supervision).
 
 ### Demo: a memory leak does not affect the brake
 
@@ -177,6 +215,7 @@ docker run --rm -v "$PWD":/workspace vrm-base build/vrm_manager config/test_safe
 ```yaml
 system: demo_vehicle
 transition_timeout_ms: 3000
+heartbeat_timeout_ms: 1500             # No heartbeat for this long = hung
 
 nodes:
   - name: brake_control
@@ -184,6 +223,8 @@ nodes:
     args: ["--period-ms", "10", "--work-ms", "2"]
     criticality: safety_critical       # safety_critical | mission_critical | best_effort
     priority: 80                       # 1-99 = SCHED_FIFO priority, 0 = normal
+    restart: on-failure                # on-failure | never (default by criticality)
+    max_restarts: 3
     resources:
       cpu: 0.5                         # CPU cores (cgroup cpu.max)
       memory: 64Mi                     # Hard limit (cgroup memory.max)
@@ -191,9 +232,15 @@ nodes:
     depends_on: []
 ```
 
-`vrm_demo_node` models a vehicle function: `--period-ms` and `--work-ms` set
-its periodic CPU load, `--memory-mb` the memory it holds, `--leak-mb-per-sec`
-makes it leak memory, and `--fail-on` makes a transition fail for testing.
+`vrm_demo_node` models a vehicle function:
+
+| Option | Effect |
+|---|---|
+| `--period-ms`, `--work-ms` | Periodic CPU load: `work` ms of computation every `period` ms |
+| `--deadline-ms` / `--no-deadline` | Deadline of each activation (default: the period) / batch work without a deadline |
+| `--memory-mb`, `--leak-mb-per-sec` | Memory held, and memory leaked while active |
+| `--crash-after-sec`, `--hang-after-sec` | Crash (SIGABRT) or stop responding after activation |
+| `--fail-on` | Make a lifecycle transition fail |
 
 ## Project Structure
 
@@ -231,9 +278,9 @@ vehicle-resource-manager/
 
 ### Phase 3 - Real-time and Supervision
 
-* [ ] SCHED_FIFO priorities for real-time nodes
-* [ ] Heartbeat (alive supervision) and deadline monitoring over DDS
-* [ ] Restart policies per criticality
+* [x] SCHED_FIFO priorities for real-time nodes
+* [x] Heartbeat (alive supervision) and deadline monitoring over DDS
+* [x] Restart policies per criticality
 
 ### Phase 4 - Arbitration
 
@@ -244,5 +291,5 @@ vehicle-resource-manager/
 ### Phase 5 - Observability
 
 * [x] Live view of nodes, budgets, usage and events (JSON status + dashboard)
+* [x] Deadline statistics in the dashboard
 * [ ] Resource and lifecycle telemetry over DDS
-* [ ] Deadline statistics in the dashboard

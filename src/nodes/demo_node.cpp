@@ -9,6 +9,10 @@
 // --leak-mb-per-sec  Memory allocated (and never freed) per second while Active,
 //              to model a runaway process.
 // --fail-on    Make a transition fail: configure, activate or error-on-configure.
+// --deadline-ms  Deadline of each tick, relative to its release (default: the period).
+// --no-deadline  Batch work: measure timing but never count deadline misses.
+// --crash-after-sec  Abort (SIGABRT) this many seconds after activation.
+// --hang-after-sec   Stop responding (endless loop) this many seconds after activation.
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +31,10 @@ struct Options {
     int work_ms = 0;
     int memory_mb = 0;
     double leak_mb_per_sec = 0.0;
+    double deadline_ms = 0.0;
+    bool no_deadline = false;
+    double crash_after_sec = 0.0;
+    double hang_after_sec = 0.0;
     std::string fail_on;
 };
 
@@ -47,6 +55,10 @@ Options parse_options(int argc, char** argv) {
         else if (arg == "--memory-mb") options.memory_mb = std::stoi(value());
         else if (arg == "--leak-mb-per-sec") options.leak_mb_per_sec = std::stod(value());
         else if (arg == "--fail-on") options.fail_on = value();
+        else if (arg == "--deadline-ms") options.deadline_ms = std::stod(value());
+        else if (arg == "--no-deadline") options.no_deadline = true;
+        else if (arg == "--crash-after-sec") options.crash_after_sec = std::stod(value());
+        else if (arg == "--hang-after-sec") options.hang_after_sec = std::stod(value());
         else {
             std::cerr << "unknown option " << arg << "\n";
             std::exit(2);
@@ -54,7 +66,8 @@ Options parse_options(int argc, char** argv) {
     }
     if (options.name.empty()) {
         std::cerr << "usage: vrm_demo_node --name NAME [--period-ms N] [--work-ms N] "
-                     "[--memory-mb N] [--leak-mb-per-sec N] [--fail-on configure|activate|error-on-configure]\n";
+                     "[--memory-mb N] [--leak-mb-per-sec N] [--deadline-ms N | --no-deadline]\n"
+                     "       [--crash-after-sec N] [--hang-after-sec N] [--fail-on configure|activate|error-on-configure]\n";
         std::exit(2);
     }
     return options;
@@ -63,7 +76,9 @@ Options parse_options(int argc, char** argv) {
 class DemoNode : public vrm::ManagedNode {
 public:
     explicit DemoNode(Options options)
-        : ManagedNode(options.name, std::chrono::milliseconds(options.period_ms)),
+        : ManagedNode(options.name, std::chrono::milliseconds(options.period_ms),
+                      options.no_deadline ? std::chrono::microseconds{-1}
+                                          : std::chrono::microseconds(static_cast<long>(options.deadline_ms * 1000))),
           options_(std::move(options)) {}
 
 protected:
@@ -86,6 +101,7 @@ protected:
     vrm::CallbackResult on_activate() override {
         if (options_.fail_on == "activate") return vrm::CallbackResult::Failure;
         ticks_ = 0;
+        activated_at_ = std::chrono::steady_clock::now();
         return vrm::CallbackResult::Success;
     }
 
@@ -95,6 +111,17 @@ protected:
     }
 
     void on_tick() override {
+        const double active_for =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - activated_at_).count();
+        if (options_.crash_after_sec > 0 && active_for >= options_.crash_after_sec) {
+            vrm::log::warn(name(), "simulating a crash");
+            std::abort();
+        }
+        if (options_.hang_after_sec > 0 && active_for >= options_.hang_after_sec) {
+            vrm::log::warn(name(), "simulating a hang");
+            for (volatile bool hung = true; hung;) {
+            }
+        }
         const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(options_.work_ms);
         while (std::chrono::steady_clock::now() < until) {
             // Busy loop to consume CPU like a real computation would.
@@ -120,6 +147,7 @@ private:
     std::chrono::steady_clock::time_point last_leak_{};
     std::vector<char> buffer_;
     long ticks_ = 0;
+    std::chrono::steady_clock::time_point activated_at_{};
 };
 
 }  // namespace

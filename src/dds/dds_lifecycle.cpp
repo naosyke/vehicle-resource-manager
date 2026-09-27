@@ -86,4 +86,16 @@ dds::sub::qos::DataReaderQos status_reader_qos(const dds::sub::Subscriber& subsc
     return qos;
 }
 
+dds::pub::qos::DataWriterQos heartbeat_writer_qos(const dds::pub::Publisher& publisher) {
+    auto qos = publisher.default_datawriter_qos();
+    qos << Reliability::BestEffort() << Durability::Volatile() << History::KeepLast(1);
+    return qos;
+}
+
+dds::sub::qos::DataReaderQos heartbeat_reader_qos(const dds::sub::Subscriber& subscriber) {
+    auto qos = subscriber.default_datareader_qos();
+    qos << Reliability::BestEffort() << Durability::Volatile() << History::KeepLast(1);
+    return qos;
+}
+
 }  // namespace vrm::dds_lifecycle
